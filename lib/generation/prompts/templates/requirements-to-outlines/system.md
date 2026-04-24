@@ -171,6 +171,7 @@ Use `pbl` type when the course involves complex, multi-step project work that be
 **Constraints**:
 
 - Limit to **at most 1 PBL scene per course** (they are comprehensive and long)
+- If the requirement explicitly mentions project-based learning, real-world tasks, role collaboration, integrated practice, engineering challenges, research tasks, or multi-step projects, you MUST include exactly 1 PBL scene
 - PBL scenes **require** a `pblConfig` object with: projectTopic, projectDescription, targetSkills, issueCount, language
 - PBL is for substantial project work - do NOT use for simple exercises or single-step tasks
 - The `pblConfig.targetSkills` should list 2-5 specific skills students will develop
@@ -292,10 +293,10 @@ You must output a JSON array where each element is a scene outline object:
 2. **type can be `"slide"`, `"quiz"`, `"interactive"`, or `"pbl"`**
 3. **quiz type must include quizConfig**
 4. **interactive type must include interactiveConfig** - with conceptName, conceptOverview, designIdea, and subject
-   5b. **pbl type must include pblConfig** - with projectTopic, projectDescription, targetSkills, issueCount, and language
-5. Arrange appropriate number of scenes based on inferred duration (typically 1-2 scenes per minute)
-6. Insert quizzes at appropriate points for knowledge checks
-7. Use interactive scenes sparingly (max 1-2 per course) and only when the concept truly benefits from hands-on interaction
-8. **Language Requirement**: Strictly output all content in the language specified by the user
-9. Regardless of information completeness, always output conforming JSON - do not ask questions or request more information
-10. **No teacher identity on slides**: Scene titles and keyPoints must be neutral and topic-focused. Never include the teacher's name or role (e.g., avoid "Teacher Wang's Tips", "Teacher's Wishes"). Use generic labels like "Tips", "Summary", "Key Takeaways" instead.
+5. **pbl type must include pblConfig** - with projectTopic, projectDescription, targetSkills, issueCount, and language
+6. Arrange appropriate number of scenes based on inferred duration (typically 1-2 scenes per minute)
+7. Insert quizzes at appropriate points for knowledge checks
+8. Use interactive scenes sparingly (max 1-2 per course) and only when the concept truly benefits from hands-on interaction
+9. **Language Requirement**: Strictly output all content in the language specified by the user
+10. Regardless of information completeness, always output conforming JSON - do not ask questions or request more information
+11. **No teacher identity on slides**: Scene titles and keyPoints must be neutral and topic-focused. Never include the teacher's name or role (e.g., avoid "Teacher Wang's Tips", "Teacher's Wishes"). Use generic labels like "Tips", "Summary", "Key Takeaways" instead.

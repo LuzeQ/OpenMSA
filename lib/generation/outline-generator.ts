@@ -164,22 +164,38 @@ export async function generateSceneOutlinesFromRequirements(
 
 /**
  * Apply type fallbacks for outlines that can't be generated as their declared type.
- * - interactive without interactiveConfig → slide
+ * - interactive without interactiveConfig → inject default interactiveConfig
  * - pbl without pblConfig or languageModel → slide
  */
+function buildDefaultInteractiveConfig(outline: SceneOutline): NonNullable<SceneOutline['interactiveConfig']> {
+  const isZh = outline.language !== 'en-US';
+  const title = outline.title || (isZh ? '互动探索' : 'Interactive Exploration');
+  const overview = outline.description || title;
+  const keyPointHint = (outline.keyPoints || []).slice(0, 3).join(isZh ? '；' : '; ');
+  return {
+    conceptName: title,
+    conceptOverview: overview,
+    designIdea: isZh
+      ? `采用轻交互（滑块、拖拽、点击切换、步骤演示）帮助理解概念。${keyPointHint}`.trim()
+      : `Use light interactions (slider, drag/drop, click toggles, step demo) to explain the concept. ${keyPointHint}`.trim(),
+    subject: isZh ? '综合科学' : 'General STEM',
+  };
+}
+
 export function applyOutlineFallbacks(
   outline: SceneOutline,
   hasLanguageModel: boolean,
 ): SceneOutline {
   if (outline.type === 'interactive' && !outline.interactiveConfig) {
     log.warn(
-      `Interactive outline "${outline.title}" missing interactiveConfig, falling back to slide`,
+      `Interactive outline "${outline.title}" missing interactiveConfig, injecting default interactiveConfig`,
     );
-    return { ...outline, type: 'slide' };
+    return { ...outline, interactiveConfig: buildDefaultInteractiveConfig(outline) };
   }
   if (outline.type === 'pbl' && (!outline.pblConfig || !hasLanguageModel)) {
+    const reason = !outline.pblConfig ? 'missing_pblConfig' : 'missing_languageModel';
     log.warn(
-      `PBL outline "${outline.title}" missing pblConfig or languageModel, falling back to slide`,
+      `PBL outline "${outline.title}" falling back to slide [pbl_fallback_reason=${reason}]`,
     );
     return { ...outline, type: 'slide' };
   }

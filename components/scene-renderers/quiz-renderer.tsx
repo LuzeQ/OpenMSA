@@ -14,9 +14,17 @@ interface QuizRendererProps {
 
 export function QuizRenderer({ content, mode, sceneId: _sceneId }: QuizRendererProps) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [attemptCount, setAttemptCount] = useState(0);
 
   const handleAnswerChange = (questionId: string, answer: string) => {
     setAnswers((prev) => ({ ...prev, [questionId]: answer }));
+  };
+
+  const handleSubmit = () => {
+    setAttemptCount((prev) => prev + 1);
+  };
+
+  const handleSkipWithDebt = () => {
   };
 
   return (
@@ -73,8 +81,26 @@ export function QuizRenderer({ content, mode, sceneId: _sceneId }: QuizRendererP
           </Card>
         ))}
         {mode === 'autonomous' && (
-          <div className="flex justify-end">
-            <Button>Submit Answers</Button>
+          <div className="flex flex-col items-end gap-3 mt-4">
+            <div className="flex gap-4">
+              {attemptCount >= 2 && (
+                <Button
+                  variant="outline"
+                  className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
+                  onClick={handleSkipWithDebt}
+                >
+                  先跳过，但标记为未掌握
+                </Button>
+              )}
+              <Button onClick={handleSubmit}>
+                {attemptCount > 0 ? '再次提交 (继续尝试)' : '提交答案'}
+              </Button>
+            </div>
+            {attemptCount >= 2 && (
+              <p className="text-xs text-muted-foreground max-w-[300px] text-right">
+                你已经尝试了 {attemptCount} 次。如果不确定，你可以向 AI 老师提问，或者选择先跳过（这会记录在老师看板中）。
+              </p>
+            )}
           </div>
         )}
       </div>

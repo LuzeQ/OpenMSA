@@ -1,9 +1,18 @@
 'use client';
 
 import { useEffect, useState, Suspense, useRef } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'motion/react';
-import { CheckCircle2, Sparkles, AlertCircle, AlertTriangle, ArrowLeft, Bot } from 'lucide-react';
+import {
+  CheckCircle2,
+  Sparkles,
+  AlertCircle,
+  AlertTriangle,
+  ArrowLeft,
+  Bot,
+  RefreshCw,
+  Loader2,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -32,9 +41,355 @@ import { StepVisualizer } from './components/visualizers';
 
 const log = createLogger('GenerationPreview');
 
+type ClassroomJobStep =
+  | 'queued'
+  | 'initializing'
+  | 'researching'
+  | 'generating_outlines'
+  | 'generating_scenes'
+  | 'generating_media'
+  | 'generating_tts'
+  | 'persisting'
+  | 'completed'
+  | 'failed';
+
+interface ClassroomJobProgressData {
+  jobId: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  step: ClassroomJobStep;
+  progress: number;
+  message: string;
+  pollIntervalMs?: number;
+  scenesGenerated: number;
+  totalScenes?: number;
+  result?: {
+    classroomId: string;
+    url: string;
+    scenesCount: number;
+  };
+  error?: string;
+  canResume?: boolean;
+  resumedScenes?: number;
+  done: boolean;
+}
+
+const JOB_STEP_SEQUENCE: ClassroomJobStep[] = [
+  'queued',
+  'initializing',
+  'researching',
+  'generating_outlines',
+  'generating_scenes',
+  'generating_media',
+  'generating_tts',
+  'persisting',
+  'completed',
+];
+
+function getJobStepTitle(step?: ClassroomJobStep) {
+  switch (step) {
+    case 'queued':
+      return '任务排队中';
+    case 'initializing':
+      return '初始化生成任务';
+    case 'researching':
+      return '检索参考资料';
+    case 'generating_outlines':
+      return '生成课程场景大纲';
+    case 'generating_scenes':
+      return '生成课程内容';
+    case 'generating_media':
+      return '生成图片/视频';
+    case 'generating_tts':
+      return '生成语音';
+    case 'persisting':
+      return '写入课堂数据';
+    case 'completed':
+      return '生成完成';
+    case 'failed':
+      return '生成失败';
+    default:
+      return '处理中';
+  }
+}
+
+function mapJobStepToVisualizerStep(step?: ClassroomJobStep): string {
+  switch (step) {
+    case 'researching':
+      return 'web-search';
+    case 'generating_outlines':
+      return 'outline';
+    case 'generating_scenes':
+      return 'slide-content';
+    case 'generating_media':
+    case 'generating_tts':
+    case 'persisting':
+    case 'completed':
+      return 'actions';
+    case 'queued':
+    case 'initializing':
+    case 'failed':
+    default:
+      return 'agent-generation';
+  }
+}
+
+function ClassroomJobMonitor({
+  jobId,
+  onBack,
+}: {
+  jobId: string;
+  onBack: () => void;
+}) {
+  const [job, setJob] = useState<ClassroomJobProgressData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [resuming, setResuming] = useState(false);
+  const [pollNonce, setPollNonce] = useState(0);
+
+  useEffect(() => {
+    let canceled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/generate-classroom/${encodeURIComponent(jobId)}`, {
+          cache: 'no-store',
+        });
+        const payload = (await res.json()) as {
+          success: boolean;
+          error?: string;
+        } & Partial<ClassroomJobProgressData> & { data?: ClassroomJobProgressData };
+        const jobPayload = payload.data || (payload.success ? (payload as ClassroomJobProgressData) : undefined);
+        if (!res.ok || !payload.success || !jobPayload) {
+          throw new Error(payload.error || '获取任务进度失败');
+        }
+
+        if (canceled) return;
+        setJob(jobPayload);
+        setError(null);
+
+        if (!jobPayload.done) {
+          const intervalMs = Math.max(1000, jobPayload.pollIntervalMs || 2500);
+          timer = setTimeout(poll, intervalMs);
+        }
+      } catch (e) {
+        if (canceled) return;
+        setError(e instanceof Error ? e.message : '获取任务进度失败');
+        timer = setTimeout(poll, 3000);
+      }
+    };
+
+    void poll();
+
+    return () => {
+      canceled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [jobId, pollNonce]);
+
+  const handleResume = async () => {
+    if (resuming) return;
+    setResuming(true);
+    try {
+      const modelConfig = getCurrentModelConfig();
+      const settings = useSettingsStore.getState();
+      const imageProviderConfig = settings.imageProvidersConfig?.[settings.imageProviderId];
+      const videoProviderConfig = settings.videoProvidersConfig?.[settings.videoProviderId];
+      const imageGenerationEnabled = settings.imageGenerationEnabled ?? true;
+      const videoGenerationEnabled = settings.videoGenerationEnabled ?? true;
+      const headers: Record<string, string> = {
+        'content-type': 'application/json',
+        'x-model': modelConfig.modelString,
+        'x-image-generation-enabled': String(imageGenerationEnabled),
+        'x-video-generation-enabled': String(videoGenerationEnabled),
+        'x-richness-min-images': String(imageGenerationEnabled ? 1 : 0),
+        'x-richness-min-videos': String(videoGenerationEnabled ? 1 : 0),
+        'x-richness-min-interactive': '1',
+        'x-richness-interactive-depth': 'light',
+        'x-image-provider': settings.imageProviderId || '',
+        'x-image-model': settings.imageModelId || '',
+        'x-image-api-key': imageProviderConfig?.apiKey || '',
+        'x-image-base-url': imageProviderConfig?.baseUrl || '',
+        'x-video-provider': settings.videoProviderId || '',
+        'x-video-model': settings.videoModelId || '',
+        'x-video-api-key': videoProviderConfig?.apiKey || '',
+        'x-video-base-url': videoProviderConfig?.baseUrl || '',
+      };
+      if (modelConfig.apiKey) headers['x-api-key'] = modelConfig.apiKey;
+      if (modelConfig.baseUrl) headers['x-base-url'] = modelConfig.baseUrl;
+      if (modelConfig.providerType) headers['x-provider-type'] = modelConfig.providerType;
+
+      const res = await fetch(`/api/generate-classroom/${encodeURIComponent(jobId)}/resume`, {
+        method: 'POST',
+        headers,
+      });
+      const payload = (await res.json()) as { success: boolean; error?: string };
+      if (!res.ok || !payload.success) {
+        throw new Error(payload.error || '续跑失败');
+      }
+
+      setError(null);
+      setJob((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: 'queued',
+              step: 'queued',
+              done: false,
+              canResume: false,
+              progress: Math.max(prev.progress || 0, 1),
+              message: '断点续跑已提交，任务排队中',
+            }
+          : prev,
+      );
+      setPollNonce((prev) => prev + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '续跑失败');
+    } finally {
+      setResuming(false);
+    }
+  };
+
+  const currentStep = (job?.step || 'queued') as ClassroomJobStep;
+  const currentStepIndex = Math.max(
+    0,
+    JOB_STEP_SEQUENCE.findIndex((step) => step === currentStep),
+  );
+  const progress = Math.max(0, Math.min(100, job?.progress || 0));
+  const visualizerStep = mapJobStepToVisualizerStep(currentStep);
+
+  return (
+    <div className="min-h-[100dvh] w-full bg-gradient-to-b from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900 flex flex-col items-center justify-center p-4 relative overflow-hidden text-center">
+      <div className="fixed inset-0 overflow-hidden pointer-events-none z-0">
+        <div
+          className="absolute top-0 left-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl animate-pulse"
+          style={{ animationDuration: '4s' }}
+        />
+        <div
+          className="absolute bottom-0 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl animate-pulse"
+          style={{ animationDuration: '6s' }}
+        />
+      </div>
+
+      <motion.div
+        initial={{ opacity: 0, y: -20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="absolute top-4 left-4 z-20"
+      >
+        <Button variant="ghost" size="sm" onClick={onBack}>
+          <ArrowLeft className="size-4 mr-2" />
+          返回
+        </Button>
+      </motion.div>
+
+      <div className="z-10 w-full max-w-lg space-y-8 flex flex-col items-center">
+        <Card className="relative overflow-hidden border-muted/40 shadow-2xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl min-h-[420px] flex flex-col items-center justify-center p-8 md:p-12 w-full">
+          <div className="absolute top-6 left-0 right-0 flex justify-center gap-2">
+            {JOB_STEP_SEQUENCE.map((step, idx) => (
+              <div
+                key={step}
+                className={cn(
+                  'h-1.5 rounded-full transition-all duration-500',
+                  idx < currentStepIndex
+                    ? 'w-1.5 bg-blue-500/30'
+                    : idx === currentStepIndex
+                      ? 'w-8 bg-blue-500'
+                      : 'w-1.5 bg-muted/50',
+                )}
+              />
+            ))}
+          </div>
+
+          <div className="flex-1 flex flex-col items-center justify-center w-full space-y-8 mt-4">
+            <div className="relative size-48 flex items-center justify-center">
+              {job?.status === 'failed' || error ? (
+                <div className="size-32 rounded-full bg-red-500/10 flex items-center justify-center border-2 border-red-500/20">
+                  <AlertCircle className="size-16 text-red-500" />
+                </div>
+              ) : job?.status === 'succeeded' ? (
+                <div className="size-32 rounded-full bg-green-500/10 flex items-center justify-center border-2 border-green-500/20">
+                  <CheckCircle2 className="size-16 text-green-500" />
+                </div>
+              ) : (
+                <StepVisualizer stepId={visualizerStep} />
+              )}
+            </div>
+
+            <div className="space-y-3 max-w-sm mx-auto w-full">
+              <h2 className="text-2xl font-bold tracking-tight">
+                {error ? '进度获取失败' : getJobStepTitle(currentStep)}
+              </h2>
+              <p className="text-muted-foreground text-base break-all">
+                {error || job?.message || '正在获取任务进度...'}
+              </p>
+
+              <div className="space-y-1 pt-1">
+                <div className="text-xs text-slate-500 flex items-center justify-between">
+                  <span>任务 ID: {jobId}</span>
+                  <span>{progress}%</span>
+                </div>
+                <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+                  <div
+                    className={cn(
+                      'h-full transition-all duration-300',
+                      job?.status === 'failed' ? 'bg-red-500' : 'bg-blue-500',
+                    )}
+                    style={{ width: `${progress}%` }}
+                  />
+                </div>
+                {job?.totalScenes ? (
+                  <div className="text-xs text-slate-500">
+                    场景进度：{job.scenesGenerated}/{job.totalScenes}
+                  </div>
+                ) : null}
+              </div>
+
+              {job?.status === 'succeeded' && job.result?.url ? (
+                <Button asChild className="w-full mt-2">
+                  <a href={job.result.url} target="_blank" rel="noreferrer">
+                    打开课堂
+                  </a>
+                </Button>
+              ) : null}
+
+              {job?.status === 'failed' && job?.canResume ? (
+                <Button
+                  className="w-full mt-2"
+                  variant="outline"
+                  onClick={handleResume}
+                  disabled={resuming}
+                >
+                  {resuming ? (
+                    <Loader2 className="size-4 mr-2 animate-spin" />
+                  ) : (
+                    <RefreshCw className="size-4 mr-2" />
+                  )}
+                  断点续跑
+                </Button>
+              ) : null}
+
+              {job?.status === 'failed' && job.error ? (
+                <div className="text-xs text-red-500 break-words text-left bg-red-500/10 border border-red-500/20 rounded-md p-2">
+                  {job.error}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 function GenerationPreviewContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { t } = useI18n();
+  const monitorJobId =
+    searchParams.get('jobId') ||
+    (typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('jobId') : null);
+  const monitorFrom =
+    searchParams.get('from') ||
+    (typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('from') : null);
   const hasStartedRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -68,6 +423,11 @@ function GenerationPreviewContent() {
 
   // Load session from sessionStorage
   useEffect(() => {
+    if (monitorJobId) {
+      setSessionLoaded(true);
+      return;
+    }
+
     cleanupOldImages(24).catch((e) => log.error(e));
 
     const saved = sessionStorage.getItem('generationSession');
@@ -80,7 +440,7 @@ function GenerationPreviewContent() {
       }
     }
     setSessionLoaded(true);
-  }, []);
+  }, [monitorJobId]);
 
   // Abort all in-flight requests on unmount
   useEffect(() => {
@@ -119,12 +479,13 @@ function GenerationPreviewContent() {
 
   // Auto-start generation when session is loaded
   useEffect(() => {
+    if (monitorJobId) return;
     if (session && !hasStartedRef.current) {
       hasStartedRef.current = true;
       startGeneration();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session]);
+  }, [monitorJobId, session]);
 
   // Main generation flow
   const startGeneration = async () => {
@@ -810,6 +1171,19 @@ function GenerationPreviewContent() {
     sessionStorage.removeItem('generationSession');
     router.push('/');
   };
+
+  const goBackToSource = () => {
+    abortControllerRef.current?.abort();
+    if (monitorFrom === 'teacher') {
+      router.push('/teacher');
+      return;
+    }
+    router.push('/');
+  };
+
+  if (monitorJobId) {
+    return <ClassroomJobMonitor jobId={monitorJobId} onBack={goBackToSource} />;
+  }
 
   // Still loading session from sessionStorage
   if (!sessionLoaded) {

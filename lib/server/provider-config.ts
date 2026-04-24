@@ -93,6 +93,8 @@ const WEB_SEARCH_ENV_MAP: Record<string, string> = {
   TAVILY: 'tavily',
 };
 
+const DISABLED_SERVER_LLM_PROVIDER_IDS = new Set(['anthropic']);
+
 // ---------------------------------------------------------------------------
 // YAML loading
 // ---------------------------------------------------------------------------
@@ -201,9 +203,13 @@ const _configs: Map<string, ServerConfig> = new Map();
 
 function buildConfig(yamlData: YamlData): ServerConfig {
   return {
-    providers: loadEnvSection(LLM_ENV_MAP, yamlData.providers, {
-      keylessProviders: new Set(['ollama']),
-    }),
+    providers: Object.fromEntries(
+      Object.entries(
+        loadEnvSection(LLM_ENV_MAP, yamlData.providers, {
+          keylessProviders: new Set(['ollama']),
+        }),
+      ).filter(([providerId]) => !DISABLED_SERVER_LLM_PROVIDER_IDS.has(providerId)),
+    ),
     tts: loadEnvSection(TTS_ENV_MAP, yamlData.tts),
     asr: loadEnvSection(ASR_ENV_MAP, yamlData.asr),
     pdf: loadEnvSection(PDF_ENV_MAP, yamlData.pdf, { requiresBaseUrl: true }),

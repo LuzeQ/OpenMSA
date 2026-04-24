@@ -26,6 +26,7 @@ import { buildPrompt, PROMPT_IDS } from './prompts';
 import { postProcessInteractiveHtml } from './interactive-post-processor';
 import { parseActionsFromStructuredOutput } from './action-parser';
 import { parseJsonResponse } from './json-repair';
+import { validateAndRepairSlideLayout } from './slide-layout-repair';
 import {
   buildCourseContext,
   formatAgentsForPrompt,
@@ -146,6 +147,21 @@ async function generateSingleScene(
 /**
  * Step 3.1: Generate content based on outline
  */
+function buildFallbackInteractiveConfig(outline: SceneOutline): NonNullable<SceneOutline['interactiveConfig']> {
+  const isZh = outline.language !== 'en-US';
+  const title = outline.title || (isZh ? '互动探索' : 'Interactive Exploration');
+  const overview = outline.description || title;
+  const keyPointHint = (outline.keyPoints || []).slice(0, 3).join(isZh ? '；' : '; ');
+  return {
+    conceptName: title,
+    conceptOverview: overview,
+    designIdea: isZh
+      ? `采用轻交互（滑块、拖拽、点击切换、步骤演示）帮助理解概念。${keyPointHint}`.trim()
+      : `Use light interactions (slider, drag/drop, click toggles, step demo) to explain the concept. ${keyPointHint}`.trim(),
+    subject: isZh ? '综合科学' : 'General STEM',
+  };
+}
+
 export async function generateSceneContent(
   outline: SceneOutline,
   aiCall: AICallFn,
@@ -162,21 +178,15 @@ export async function generateSceneContent(
   | GeneratedPBLContent
   | null
 > {
-  // If outline is interactive but missing interactiveConfig, fall back to slide
+  // If outline is interactive but missing interactiveConfig, synthesize one
   if (outline.type === 'interactive' && !outline.interactiveConfig) {
     log.warn(
-      `Interactive outline "${outline.title}" missing interactiveConfig, falling back to slide`,
+      `Interactive outline "${outline.title}" missing interactiveConfig, injecting fallback config`,
     );
-    const fallbackOutline = { ...outline, type: 'slide' as const };
-    return generateSlideContent(
-      fallbackOutline,
-      aiCall,
-      assignedImages,
-      imageMapping,
-      visionEnabled,
-      generatedMediaMapping,
-      agents,
-    );
+    outline = {
+      ...outline,
+      interactiveConfig: buildFallbackInteractiveConfig(outline),
+    };
   }
 
   switch (outline.type) {
@@ -559,7 +569,7 @@ async function generateSlideContent(
   }
 
   const response = await aiCall(prompts.system, prompts.user, visionImages);
-  const generatedData = parseJsonResponse<GeneratedSlideData>(response);
+  let generatedData = parseJsonResponse<GeneratedSlideData>(response);
 
   if (!generatedData || !generatedData.elements || !Array.isArray(generatedData.elements)) {
     log.error(`Failed to parse AI response for: ${outline.title}`);
@@ -584,11 +594,50 @@ async function generateSlideContent(
   }
 
   // Fix elements with missing required fields + aspect ratio correction (while src is still img_id)
-  const fixedElements = fixElementDefaults(generatedData.elements, assignedImages);
+  let fixedElements = fixElementDefaults(generatedData.elements, assignedImages);
+  let layoutRepair = validateAndRepairSlideLayout(fixedElements, {
+    canvasWidth,
+    canvasHeight,
+    assignedImages,
+    mediaGenerations: outline.mediaGenerations,
+  });
+
+  if (layoutRepair.shouldRetry && layoutRepair.retryInstruction) {
+    log.warn(`Retrying slide content due to layout issues: ${layoutRepair.retryInstruction}`);
+    const retryResponse = await aiCall(
+      prompts.system,
+      `${prompts.user}\n\n## Layout correction required\n${layoutRepair.retryInstruction}\nOutput a fresh JSON slide. Use one stable template: title-only, left-text-right-media, three cards, flow arrows, formula derivation, or summary.`,
+      visionImages,
+    );
+    const retryData = parseJsonResponse<GeneratedSlideData>(retryResponse);
+    if (retryData?.elements && Array.isArray(retryData.elements)) {
+      generatedData = retryData;
+      fixedElements = fixElementDefaults(generatedData.elements, assignedImages);
+      layoutRepair = validateAndRepairSlideLayout(fixedElements, {
+        canvasWidth,
+        canvasHeight,
+        assignedImages,
+        mediaGenerations: outline.mediaGenerations,
+      });
+    }
+  }
+
+  fixedElements = layoutRepair.elements;
+  if (layoutRepair.issues.length > 0) {
+    log.info(`Slide layout repair applied: ${layoutRepair.issues.map((issue) => issue.code).join(', ')}`);
+  }
   log.debug(`After element fixing: ${fixedElements.length} elements`);
 
   // Process LaTeX elements: render latex string → HTML via KaTeX
-  const latexProcessedElements = processLatexElements(fixedElements);
+  const latexProcessedElements = validateAndRepairSlideLayout(
+    processLatexElements(fixedElements),
+    {
+      canvasWidth,
+      canvasHeight,
+      assignedImages,
+      mediaGenerations: outline.mediaGenerations,
+    },
+  ).elements;
   log.debug(`After LaTeX processing: ${latexProcessedElements.length} elements`);
 
   // Resolve image_id references to actual URLs
@@ -828,13 +877,13 @@ async function generatePBLSceneContent(
   languageModel?: LanguageModel,
 ): Promise<GeneratedPBLContent | null> {
   if (!languageModel) {
-    log.error('LanguageModel required for PBL generation');
+    log.error('LanguageModel required for PBL generation [pbl_fallback_reason=missing_languageModel]');
     return null;
   }
 
   const pblConfig = outline.pblConfig;
   if (!pblConfig) {
-    log.error(`PBL outline "${outline.title}" missing pblConfig`);
+    log.error(`PBL outline "${outline.title}" missing pblConfig [pbl_fallback_reason=missing_pblConfig]`);
     return null;
   }
 
@@ -860,7 +909,7 @@ async function generatePBLSceneContent(
 
     return { projectConfig };
   } catch (error) {
-    log.error(`Failed:`, error);
+    log.error(`Failed [pbl_fallback_reason=pbl_generation_failed]:`, error);
     return null;
   }
 }

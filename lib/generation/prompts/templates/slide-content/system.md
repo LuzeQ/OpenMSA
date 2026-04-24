@@ -521,6 +521,19 @@ When splitting a derivation across multiple LaTeX elements (one per line), simpl
 
 ## Design Rules
 
+### Rule 0: Use a Fixed Layout Template
+
+Choose exactly one stable template before placing elements. Do not freely scatter elements.
+
+- Title-only: title at top, 1-2 centered key takeaways below.
+- Left-text-right-media: title top, text column left, image/video/chart right.
+- Three-card: title top, three equal cards in one row with identical top/width/height.
+- Flow arrows: title top, 3-4 equal nodes with 60-80px gaps and arrows only in the gaps.
+- Formula derivation: title top, formulas stacked vertically with consistent left alignment.
+- Summary: title top, 3-5 concise bullets in one wide content block.
+
+If content does not clearly require arrows, do not create LineElement arrows. Prefer aligned cards and simple shapes over decorative connectors.
+
 ### Rule 1: Text Width Calculation
 
 Before finalizing any text element, verify it fits in one line (unless multi-line is intended):

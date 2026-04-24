@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import { usePathname } from 'next/navigation';
 import { useSettingsStore } from '@/lib/store/settings';
 
 /**
@@ -9,10 +10,14 @@ import { useSettingsStore } from '@/lib/store/settings';
  */
 export function ServerProvidersInit() {
   const fetchServerProviders = useSettingsStore((state) => state.fetchServerProviders);
+  const pathname = usePathname();
 
   useEffect(() => {
+    if (pathname === '/login' || pathname === '/register') {
+      return;
+    }
     fetchServerProviders();
-  }, [fetchServerProviders]);
+  }, [fetchServerProviders, pathname]);
 
   return null;
 }

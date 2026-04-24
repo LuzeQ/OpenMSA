@@ -54,10 +54,10 @@ describe('provider-config', () => {
       expect(resolveApiKey('openai', 'sk-client')).toBe('sk-client');
     });
 
-    it('resolves non-OpenAI providers via their env prefix', async () => {
+    it('does not use Anthropic server keys anymore', async () => {
       vi.stubEnv('ANTHROPIC_API_KEY', 'sk-anthropic');
       const { resolveApiKey } = await import('@/lib/server/provider-config');
-      expect(resolveApiKey('anthropic')).toBe('sk-anthropic');
+      expect(resolveApiKey('anthropic')).toBe('');
     });
 
     it('returns empty string for unknown provider with no env var', async () => {
@@ -82,6 +82,13 @@ describe('provider-config', () => {
     it('returns undefined when neither client nor server URL exists', async () => {
       const { resolveBaseUrl } = await import('@/lib/server/provider-config');
       expect(resolveBaseUrl('openai')).toBeUndefined();
+    });
+
+    it('does not use Anthropic server base URLs anymore', async () => {
+      vi.stubEnv('ANTHROPIC_API_KEY', 'sk-anthropic');
+      vi.stubEnv('ANTHROPIC_BASE_URL', 'https://anthropic.example.com/v1');
+      const { resolveBaseUrl } = await import('@/lib/server/provider-config');
+      expect(resolveBaseUrl('anthropic')).toBeUndefined();
     });
   });
 
@@ -123,14 +130,14 @@ providers:
       expect((providers.openai as Record<string, unknown>).apiKey).toBeUndefined();
     });
 
-    it('lists multiple providers', async () => {
+    it('keeps Anthropic out of the server provider list', async () => {
       vi.stubEnv('OPENAI_API_KEY', 'sk-openai');
       vi.stubEnv('ANTHROPIC_API_KEY', 'sk-anthropic');
       const { getServerProviders } = await import('@/lib/server/provider-config');
       const providers = getServerProviders();
 
       expect(Object.keys(providers)).toContain('openai');
-      expect(Object.keys(providers)).toContain('anthropic');
+      expect(Object.keys(providers)).not.toContain('anthropic');
     });
 
     it('omits providers without API key', async () => {

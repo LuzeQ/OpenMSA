@@ -2,6 +2,10 @@ import { cookies } from 'next/headers';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 
+/**
+ * @deprecated Access code is no longer used as a runtime auth gate.
+ * This endpoint is kept only for backward compatibility.
+ */
 /** Create an HMAC-signed token: `timestamp.signature` */
 function createAccessToken(accessCode: string): string {
   const timestamp = Date.now().toString();

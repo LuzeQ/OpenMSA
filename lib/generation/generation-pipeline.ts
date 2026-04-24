@@ -46,5 +46,7 @@ export {
   uniquifyMediaElementIds,
 } from './scene-builder';
 
+export { validateAndRepairSlideLayout } from './slide-layout-repair';
+
 // Pipeline runner
 export { createGenerationSession, runGenerationPipeline } from './pipeline-runner';

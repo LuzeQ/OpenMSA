@@ -22,7 +22,9 @@ export async function writeJsonFileAtomic(filePath: string, data: unknown) {
   const dir = path.dirname(filePath);
   await ensureDir(dir);
 
-  const tempFilePath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  // Include random entropy to avoid temp-file collisions under high concurrency.
+  const uniqueSuffix = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}`;
+  const tempFilePath = `${filePath}.${uniqueSuffix}.tmp`;
   const content = JSON.stringify(data, null, 2);
   await fs.writeFile(tempFilePath, content, 'utf-8');
   await fs.rename(tempFilePath, filePath);

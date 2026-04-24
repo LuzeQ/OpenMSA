@@ -20,6 +20,10 @@ export async function POST(req: NextRequest) {
       requirement: rawBody.requirement || '',
       ...(rawBody.pdfContent ? { pdfContent: rawBody.pdfContent } : {}),
       ...(rawBody.language ? { language: rawBody.language } : {}),
+      ...(rawBody.modelString ? { modelString: rawBody.modelString } : {}),
+      ...(rawBody.apiKey ? { apiKey: rawBody.apiKey } : {}),
+      ...(rawBody.baseUrl ? { baseUrl: rawBody.baseUrl } : {}),
+      ...(rawBody.providerType ? { providerType: rawBody.providerType } : {}),
       ...(rawBody.enableWebSearch != null ? { enableWebSearch: rawBody.enableWebSearch } : {}),
       ...(rawBody.enableImageGeneration != null
         ? { enableImageGeneration: rawBody.enableImageGeneration }
@@ -29,6 +33,8 @@ export async function POST(req: NextRequest) {
         : {}),
       ...(rawBody.enableTTS != null ? { enableTTS: rawBody.enableTTS } : {}),
       ...(rawBody.agentMode ? { agentMode: rawBody.agentMode } : {}),
+      ...(rawBody.mediaConfig ? { mediaConfig: rawBody.mediaConfig } : {}),
+      ...(rawBody.richnessPolicy ? { richnessPolicy: rawBody.richnessPolicy } : {}),
     };
     const { requirement } = body;
 

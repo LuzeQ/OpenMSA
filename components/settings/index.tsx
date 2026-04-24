@@ -56,6 +56,7 @@ import { WebSearchSettings } from './web-search-settings';
 import { WEB_SEARCH_PROVIDERS } from '@/lib/web-search/constants';
 import type { WebSearchProviderId } from '@/lib/web-search/types';
 import { GeneralSettings } from './general-settings';
+import { ModelSelector } from './model-selector';
 import { ModelEditDialog } from './model-edit-dialog';
 import { AddProviderDialog, type NewProviderData } from './add-provider-dialog';
 import { AddAudioProviderDialog, type NewAudioProviderData } from './add-audio-provider-dialog';
@@ -208,7 +209,7 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
 
   // Get settings from store
   const providerId = useSettingsStore((state) => state.providerId);
-  const _modelId = useSettingsStore((state) => state.modelId);
+  const modelId = useSettingsStore((state) => state.modelId);
   const providersConfig = useSettingsStore((state) => state.providersConfig);
   const pdfProviderId = useSettingsStore((state) => state.pdfProviderId);
   const pdfProvidersConfig = useSettingsStore((state) => state.pdfProvidersConfig);
@@ -240,6 +241,7 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
     useState<ImageProviderId>(imageProviderId);
   const [selectedVideoProviderId, setSelectedVideoProviderId] =
     useState<VideoProviderId>(videoProviderId);
+
   // Navigate to initialSection when dialog opens
   useEffect(() => {
     if (open && initialSection) {
@@ -334,6 +336,12 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
 
   const handleProviderSelect = (pid: ProviderId) => {
     setSelectedProviderId(pid);
+    const firstModelId =
+      providersConfig[pid]?.serverModels?.[0] || providersConfig[pid]?.models?.[0]?.id;
+    if (firstModelId) {
+      setModel(pid, firstModelId);
+      handleProviderConfigSave();
+    }
   };
 
   const handleProviderConfigChange = (
@@ -342,11 +350,29 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
     baseUrl: string,
     requiresApiKey: boolean,
   ) => {
+    const prevApiKey = providersConfig[pid]?.apiKey || '';
+    const firstModelId = providersConfig[pid]?.models?.[0]?.id;
+
     setProviderConfig(pid, {
       apiKey,
       baseUrl,
       requiresApiKey,
     });
+
+    // If user just configured a new API key for another provider,
+    // auto-switch current model to that provider to avoid continuing on a stale selection.
+    if (pid !== providerId && !prevApiKey && apiKey.trim() && firstModelId) {
+      setModel(pid, firstModelId);
+      setSelectedProviderId(pid);
+      return;
+    }
+
+    // Ensure current provider always has a concrete selected model.
+    if (pid === providerId && (!modelId || !providersConfig[pid]?.models?.some((m) => m.id === modelId))) {
+      if (firstModelId) {
+        setModel(pid, firstModelId);
+      }
+    }
   };
 
   const handleProviderConfigSave = () => {
@@ -515,15 +541,15 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
 
   // Get all providers from providersConfig
   const allProviders = Object.entries(providersConfig).map(([id, config]) => ({
-    id: id as ProviderId,
-    name: config.name,
-    type: config.type,
-    defaultBaseUrl: config.defaultBaseUrl,
-    icon: config.icon,
-    requiresApiKey: config.requiresApiKey,
-    models: config.models,
-    isServerConfigured: config.isServerConfigured,
-  }));
+      id: id as ProviderId,
+      name: config.name,
+      type: config.type,
+      defaultBaseUrl: config.defaultBaseUrl,
+      icon: config.icon,
+      requiresApiKey: config.requiresApiKey,
+      models: config.models,
+      isServerConfigured: config.isServerConfigured,
+    }));
 
   // Sections that show a provider list column
   const _hasProviderList = [
@@ -1026,24 +1052,44 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
               {activeSection === 'general' && <GeneralSettings />}
 
               {activeSection === 'providers' && selectedProvider && (
-                <ProviderConfigPanel
-                  provider={selectedProvider}
-                  initialApiKey={providersConfig[selectedProviderId]?.apiKey || ''}
-                  initialBaseUrl={providersConfig[selectedProviderId]?.baseUrl || ''}
-                  initialRequiresApiKey={
-                    providersConfig[selectedProviderId]?.requiresApiKey ?? true
-                  }
-                  providersConfig={providersConfig}
-                  onConfigChange={(apiKey, baseUrl, requiresApiKey) =>
-                    handleProviderConfigChange(selectedProviderId, apiKey, baseUrl, requiresApiKey)
-                  }
-                  onSave={handleProviderConfigSave}
-                  onEditModel={(index) => handleEditModel(selectedProviderId, index)}
-                  onDeleteModel={(index) => handleDeleteModel(selectedProviderId, index)}
-                  onAddModel={handleAddModel}
-                  onResetToDefault={() => handleResetProvider(selectedProviderId)}
-                  isBuiltIn={providersConfig[selectedProviderId]?.isBuiltIn ?? true}
-                />
+                <div className="space-y-5">
+                  <div className="space-y-2">
+                    <div className="text-sm font-medium">
+                      {t('settings.selectModel') !== 'settings.selectModel'
+                        ? t('settings.selectModel')
+                        : '选择当前模型'}
+                    </div>
+                    <ModelSelector
+                      providerId={providerId}
+                      modelId={modelId}
+                      providersConfig={providersConfig}
+                      onModelChange={(pid, mid) => {
+                        setModel(pid, mid);
+                        setSelectedProviderId(pid);
+                        handleProviderConfigSave();
+                      }}
+                    />
+                  </div>
+
+                  <ProviderConfigPanel
+                    provider={selectedProvider}
+                    initialApiKey={providersConfig[selectedProviderId]?.apiKey || ''}
+                    initialBaseUrl={providersConfig[selectedProviderId]?.baseUrl || ''}
+                    initialRequiresApiKey={
+                      providersConfig[selectedProviderId]?.requiresApiKey ?? true
+                    }
+                    providersConfig={providersConfig}
+                    onConfigChange={(apiKey, baseUrl, requiresApiKey) =>
+                      handleProviderConfigChange(selectedProviderId, apiKey, baseUrl, requiresApiKey)
+                    }
+                    onSave={handleProviderConfigSave}
+                    onEditModel={(index) => handleEditModel(selectedProviderId, index)}
+                    onDeleteModel={(index) => handleDeleteModel(selectedProviderId, index)}
+                    onAddModel={handleAddModel}
+                    onResetToDefault={() => handleResetProvider(selectedProviderId)}
+                    isBuiltIn={providersConfig[selectedProviderId]?.isBuiltIn ?? true}
+                  />
+                </div>
               )}
 
               {activeSection === 'pdf' && (

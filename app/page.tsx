@@ -403,6 +403,16 @@ function HomePage() {
 
         <div className="w-[1px] h-4 bg-gray-200 dark:bg-gray-700" />
 
+        {/* ── Login / Workspace Button (Always visible) ── */}
+        <button
+          onClick={() => router.push('/login')}
+          className="px-3 py-1.5 rounded-full text-[13px] font-medium bg-violet-50 text-violet-600 hover:bg-violet-100 hover:text-violet-700 dark:bg-violet-500/10 dark:text-violet-400 dark:hover:bg-violet-500/20 transition-colors whitespace-nowrap"
+        >
+          登录 / 工作台
+        </button>
+
+        <div className="w-[1px] h-4 bg-gray-200 dark:bg-gray-700" />
+
         {/* Settings Button */}
         <div className="relative">
           <button
@@ -867,7 +877,7 @@ function GreetingBar() {
               </div>
 
               {/* ── Expandable content ── */}
-              <div className="pt-2" onClick={(e) => e.stopPropagation()}>
+              <div className="pt-1" onClick={(e) => e.stopPropagation()}>
                 {/* Avatar picker */}
                 <AnimatePresence>
                   {avatarPickerOpen && (

@@ -90,7 +90,7 @@ function buildDisableThinking(
 ): ProviderOptions | undefined {
   switch (providerType) {
     case 'openai': {
-      // GPT-5.1/5.2: support effort=none (fully off)
+      // GPT-5.1/5.2/5.5: support effort=none (fully off)
       // GPT-5/mini/nano: lowest is minimal
       // o-series: lowest is low
       let effort: string;

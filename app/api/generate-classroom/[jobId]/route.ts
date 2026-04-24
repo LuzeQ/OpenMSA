@@ -40,6 +40,8 @@ export async function GET(req: NextRequest, context: { params: Promise<{ jobId: 
       totalScenes: job.totalScenes,
       result: job.result,
       error: job.error,
+      canResume: job.status === 'failed' && Boolean(job.resumeInput?.requirement?.trim()),
+      resumedScenes: job.checkpoint?.completedSceneIndexes.length || 0,
       done: job.status === 'succeeded' || job.status === 'failed',
     });
   } catch (error) {
