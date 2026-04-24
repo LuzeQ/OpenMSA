@@ -57,12 +57,12 @@ describe('PBL outline rules', () => {
 
   it('documents PBL trigger requirements in the outline prompt', async () => {
     const prompt = await fs.readFile(
-      path.join(process.cwd(), 'lib/generation/prompts/templates/requirements-to-outlines/user.md'),
+      path.join(process.cwd(), 'lib/prompts/templates/requirements-to-outlines/user.md'),
       'utf-8',
     );
 
-    expect(prompt).toContain('"type": "slide" or "quiz" or "interactive" or "pbl"');
-    expect(prompt).toContain('generate exactly one `"type": "pbl"` scene');
-    expect(prompt).toContain('"pblConfig"');
+    expect(prompt).toContain('"type": "slide" | "quiz" | "interactive" | "pbl"');
+    expect(prompt).toContain('include exactly one `"type": "pbl"` scene');
+    expect(prompt).toContain('Its `pblConfig` must be complete');
   });
 });

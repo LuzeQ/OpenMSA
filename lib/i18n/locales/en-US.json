@@ -10,7 +10,6 @@
     "greetingWithName": "Hi, {{name}}"
   },
   "toolbar": {
-    "languageHint": "Course will be generated in this language",
     "pdfParser": "Parser",
     "pdfUpload": "Upload PDF",
     "removePdf": "Remove file",
@@ -27,7 +26,9 @@
     "ttsTitle": "Text-to-Speech",
     "ttsHint": "Choose a voice for the AI teacher",
     "ttsPreview": "Preview",
-    "ttsPreviewing": "Playing..."
+    "ttsPreviewing": "Playing...",
+    "interactiveModeHint": "Enable interactive-first mode for more hands-on content",
+    "interactiveModeLabel": "Interactive Mode"
   },
   "export": {
     "pptx": "Export PPTX",
@@ -35,7 +36,23 @@
     "resourcePackDesc": "PPTX + interactive pages",
     "exporting": "Exporting...",
     "exportSuccess": "Export successful",
-    "exportFailed": "Export failed"
+    "exportFailed": "Export failed",
+    "classroomZip": "Export Classroom ZIP",
+    "classroomZipDesc": "Course structure + media files"
+  },
+  "import": {
+    "classroom": "Import Classroom",
+    "parsing": "Parsing ZIP...",
+    "validating": "Validating data...",
+    "writingMedia": "Writing media files...",
+    "writingCourse": "Writing course data...",
+    "success": "Classroom imported successfully",
+    "error": {
+      "invalidZip": "Invalid file. Please select a valid .maic.zip file.",
+      "invalidManifest": "Invalid classroom file: manifest.json is missing or corrupted.",
+      "missingData": "Invalid classroom file: missing required course data.",
+      "storageFull": "Import failed: browser storage is full. Try clearing old classrooms."
+    }
   },
   "chat": {
     "lecture": "Lecture",
@@ -212,7 +229,6 @@
       "mentionHint": "Use @question to ask, @judge to submit for review",
       "placeholder": "Type a message...",
       "send": "Send",
-      "welcomeMessage": "Hello! I'm your Question Agent for this issue: \"{{title}}\"\n\nTo help guide your work, I've prepared some questions for you:\n\n{{questions}}\n\nFeel free to @question me anytime if you need help or clarification!",
       "issueCompleteMessage": "Issue \"{{completed}}\" completed! Moving to next issue: \"{{next}}\"",
       "allCompleteMessage": "🎉 All issues completed! Great work on the project!"
     },
@@ -264,7 +280,11 @@
     "delete": "Delete",
     "rename": "Rename",
     "renamePlaceholder": "Enter classroom name",
-    "renameFailed": "Failed to rename classroom"
+    "renameFailed": "Failed to rename classroom",
+    "searchPlaceholder": "Search courses...",
+    "searchAriaLabel": "Search courses",
+    "clearSearch": "Clear",
+    "searchEmpty": "No courses match your search"
   },
   "upload": {
     "pdfSizeLimit": "Supports PDF files up to 50MB",
@@ -427,6 +447,10 @@
     "importFromClipboard": "Import from Clipboard",
     "apiSecret": "API Key",
     "apiHost": "Base URL",
+    "baseUrlRegion": {
+      "china": "China",
+      "international": "International"
+    },
     "requestUrl": "Request URL",
     "models": "Models",
     "addModel": "New",
@@ -555,6 +579,7 @@
     "providerQwenASR": "Qwen ASR (Alibaba Cloud Bailian)",
     "providerUnpdf": "unpdf (Built-in)",
     "providerMinerU": "MinerU",
+    "providerMinerUCloud": "MinerU (Cloud)",
     "browserNativeTTSNote": "Browser Native TTS requires no configuration and is completely free, using system built-in voices",
     "testTTS": "Test TTS",
     "testASR": "Test ASR",
@@ -783,6 +808,7 @@
     "mineruLocalDescription": "MinerU supports local deployment with advanced PDF parsing (tables, formulas, layout analysis). Requires deploying MinerU service first.",
     "mineruServerAddress": "Local MinerU server address (e.g., http://localhost:8080)",
     "mineruApiKeyOptional": "Only required if server has authentication enabled",
+    "mineruCloudApiKeyPlaceholder": "Enter MinerU Cloud API Key",
     "optionalApiKey": "Optional API Key",
     "featureText": "Text Extraction",
     "featureImages": "Image Extraction",

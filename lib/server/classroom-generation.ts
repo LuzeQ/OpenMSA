@@ -3,6 +3,7 @@ import { callLLM } from '@/lib/ai/llm';
 import { createStageAPI } from '@/lib/api/stage-api';
 import type { StageStore } from '@/lib/api/stage-api-types';
 import {
+  DEFAULT_LANGUAGE_DIRECTIVE,
   applyOutlineFallbacks,
   generateSceneOutlinesFromRequirements,
 } from '@/lib/generation/outline-generator';
@@ -880,6 +881,10 @@ export async function generateClassroom(
   };
 
   const lang = normalizeLanguage(input.language);
+  const fallbackLanguageDirective =
+    lang === 'en-US'
+      ? 'Teach in English. Keep terminology and examples consistent with English instruction.'
+      : DEFAULT_LANGUAGE_DIRECTIVE;
   const richnessPolicy = normalizeRichnessPolicy(input.richnessPolicy, {
     enableImageGeneration: input.enableImageGeneration,
     enableVideoGeneration: input.enableVideoGeneration,
@@ -905,6 +910,7 @@ export async function generateClassroom(
   let stage: Stage;
   let stageId: string;
   let outlines: SceneOutline[];
+  let languageDirective = fallbackLanguageDirective;
 
   if (resumeCheckpoint) {
     agents = Array.isArray(resumeCheckpoint.agents) && resumeCheckpoint.agents.length > 0
@@ -914,6 +920,7 @@ export async function generateClassroom(
     stage = resumeCheckpoint.stage;
     stageId = stage.id;
     outlines = resumeCheckpoint.outlines;
+    languageDirective = stage.languageDirective || fallbackLanguageDirective;
     log.info(
       `Resuming classroom generation from checkpoint [stageId=${stageId}, scenesDone=${resumeCheckpoint.completedSceneIndexes.length}/${outlines.length}]`,
     );
@@ -1004,12 +1011,15 @@ export async function generateClassroom(
       },
     );
 
-    if (!outlinesResult.success || !outlinesResult.data || outlinesResult.data.length === 0) {
+    if (!outlinesResult.success || !outlinesResult.data || outlinesResult.data.outlines.length === 0) {
       log.error('Failed to generate outlines, switching to heuristic fallback:', outlinesResult.error);
       outlines = buildHeuristicFallbackOutlines(requirement, lang);
     } else {
-      outlines = outlinesResult.data;
-      log.info(`Generated ${outlines.length} scene outlines`);
+      languageDirective = outlinesResult.data.languageDirective || fallbackLanguageDirective;
+      outlines = outlinesResult.data.outlines;
+      log.info(
+        `Generated ${outlines.length} scene outlines (languageDirective: ${languageDirective})`,
+      );
     }
 
     outlines = applyRichnessPolicyToOutlines(outlines, lang, richnessPolicy);
@@ -1030,7 +1040,7 @@ export async function generateClassroom(
       id: stageId,
       name: outlines[0]?.title || requirement.slice(0, 50),
       description: undefined,
-      language: lang,
+      languageDirective,
       style: 'interactive',
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -1052,6 +1062,13 @@ export async function generateClassroom(
         : {
             agentIds: agents.map((a) => a.id),
           }),
+    };
+  }
+
+  if (!stage.languageDirective) {
+    stage = {
+      ...stage,
+      languageDirective,
     };
   }
 
@@ -1132,19 +1149,14 @@ export async function generateClassroom(
   };
 
   const processSingleScene = async (index: number) => {
-    const safeOutline = applyOutlineFallbacks(outlines[index], true);
+    const safeOutline = applyOutlineFallbacks(outlines[index], Boolean(languageModel));
 
     try {
-      const content = await generateSceneContent(
-        safeOutline,
-        aiCall,
-        undefined,
-        undefined,
-        safeOutline.type === 'pbl' ? languageModel : undefined,
-        undefined,
-        undefined,
+      const content = await generateSceneContent(safeOutline, aiCall, {
+        languageModel: safeOutline.type === 'pbl' ? languageModel : undefined,
         agents,
-      );
+        languageDirective,
+      });
       if (!content) {
         if (safeOutline.type === 'pbl') {
           log.warn(
@@ -1159,7 +1171,10 @@ export async function generateClassroom(
         return;
       }
 
-      const actions = await generateSceneActions(safeOutline, content, aiCall, undefined, agents);
+      const actions = await generateSceneActions(safeOutline, content, aiCall, {
+        agents,
+        languageDirective,
+      });
       log.info(`Scene "${safeOutline.title}": ${actions.length} actions`);
 
       const sceneId = createSceneWithActions(safeOutline, content, actions, api);

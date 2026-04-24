@@ -6,14 +6,15 @@
  * so the frontend can display them incrementally.
  *
  * SSE events:
+ *   { type: 'languageDirective', data: string }
  *   { type: 'outline', data: SceneOutline, index: number }
- *   { type: 'done', outlines: SceneOutline[] }
+ *   { type: 'done', outlines: SceneOutline[], languageDirective: string }
  *   { type: 'error', error: string }
  */
 
 import { NextRequest } from 'next/server';
 import { streamLLM } from '@/lib/ai/llm';
-import { buildPrompt, PROMPT_IDS } from '@/lib/generation/prompts';
+import { buildPrompt, PROMPT_IDS } from '@/lib/prompts';
 import {
   formatImageDescription,
   formatImagePlaceholder,
@@ -22,6 +23,7 @@ import {
   formatTeacherPersonaForPrompt,
 } from '@/lib/generation/generation-pipeline';
 import type { AgentInfo } from '@/lib/generation/generation-pipeline';
+import { DEFAULT_LANGUAGE_DIRECTIVE } from '@/lib/generation/outline-generator';
 import { MAX_PDF_CONTENT_CHARS, MAX_VISION_IMAGES } from '@/lib/constants/generation';
 import { nanoid } from 'nanoid';
 import type {
@@ -38,16 +40,44 @@ const log = createLogger('Outlines Stream');
 export const maxDuration = 300;
 
 /**
+ * Extract the languageDirective from the streamed wrapper JSON.
+ * Matches `"languageDirective":"<value>"` in partial JSON like:
+ *   {"languageDirective":"用中文授课...","outlines":[...
+ */
+function extractLanguageDirective(buffer: string): string | null {
+  const match = buffer.match(/"languageDirective"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (!match) return null;
+  try {
+    return JSON.parse(`"${match[1]}"`);
+  } catch {
+    return match[1];
+  }
+}
+
+/**
  * Incremental JSON array parser.
  * Extracts complete top-level objects from a partially-streamed JSON array.
+ * Supports both a flat array `[{...},{...}]` and a wrapper object
+ * `{"languageDirective":"...","outlines":[{...},{...}]}`.
  * Returns newly found objects (skipping `alreadyParsed` count).
  */
 function extractNewOutlines(buffer: string, alreadyParsed: number): SceneOutline[] {
   const results: SceneOutline[] = [];
 
-  // Find the start of the JSON array (skip any markdown fencing)
-  const stripped = buffer.replace(/^[\s\S]*?(?=\[)/, '');
-  const arrayStart = stripped.indexOf('[');
+  // Strip markdown fencing if present
+  const stripped = buffer.replace(/^[\s\S]*?(?=[\[{])/, '');
+
+  // Find the outlines array — either nested in {"outlines": [...]} or a flat array
+  let arrayStart = -1;
+  const outlinesKeyIdx = stripped.indexOf('"outlines"');
+  if (outlinesKeyIdx >= 0) {
+    // Wrapper format: find [ after "outlines":
+    arrayStart = stripped.indexOf('[', outlinesKeyIdx);
+  } else {
+    // Flat array fallback
+    arrayStart = stripped.indexOf('[');
+  }
+
   if (arrayStart === -1) return results;
 
   let depth = 0;
@@ -120,12 +150,17 @@ export async function POST(req: NextRequest) {
     };
     requirementSnippet = requirements?.requirement?.substring(0, 60);
 
+    // Build user profile string for language inference context
+    const userProfileText =
+      requirements.userNickname || requirements.userBio
+        ? `## Student Profile\n\nStudent: ${requirements.userNickname || 'Unknown'}${requirements.userBio ? ` — ${requirements.userBio}` : ''}\n\nConsider this student's background when designing the course. Adapt difficulty, examples, and teaching approach accordingly.\n\n---`
+        : '';
+
     // Detect vision capability
     const hasVision = !!modelInfo?.capabilities?.vision;
 
     // Build prompt (same logic as generateSceneOutlinesFromRequirements)
-    let availableImagesText =
-      requirements.language === 'zh-CN' ? '无可用图片' : 'No images available';
+    let availableImagesText = 'No images available';
     let visionImages: Array<{ id: string; src: string }> | undefined;
 
     if (pdfImages && pdfImages.length > 0) {
@@ -136,11 +171,9 @@ export async function POST(req: NextRequest) {
         const textOnlySlice = allWithSrc.slice(MAX_VISION_IMAGES);
         const noSrcImages = pdfImages.filter((img) => !imageMapping[img.id]);
 
-        const visionDescriptions = visionSlice.map((img) =>
-          formatImagePlaceholder(img, requirements.language),
-        );
+        const visionDescriptions = visionSlice.map((img) => formatImagePlaceholder(img));
         const textDescriptions = [...textOnlySlice, ...noSrcImages].map((img) =>
-          formatImageDescription(img, requirements.language),
+          formatImageDescription(img),
         );
         availableImagesText = [...visionDescriptions, ...textDescriptions].join('\n');
 
@@ -152,9 +185,7 @@ export async function POST(req: NextRequest) {
         }));
       } else {
         // Text-only mode: full descriptions
-        availableImagesText = pdfImages
-          .map((img) => formatImageDescription(img, requirements.language))
-          .join('\n');
+        availableImagesText = pdfImages.map((img) => formatImageDescription(img)).join('\n');
       }
     }
 
@@ -176,18 +207,20 @@ export async function POST(req: NextRequest) {
     // Build teacher context from agents (if available)
     const teacherContext = formatTeacherPersonaForPrompt(agents);
 
-    const prompts = buildPrompt(PROMPT_IDS.REQUIREMENTS_TO_OUTLINES, {
+    // Check if Interactive Mode is enabled
+    const interactiveMode = requirements.interactiveMode ?? false;
+    const promptId = interactiveMode
+      ? PROMPT_IDS.INTERACTIVE_OUTLINES
+      : PROMPT_IDS.REQUIREMENTS_TO_OUTLINES;
+
+    const prompts = buildPrompt(promptId, {
       requirement: requirements.requirement,
-      language: requirements.language,
-      pdfContent: pdfText
-        ? pdfText.substring(0, MAX_PDF_CONTENT_CHARS)
-        : requirements.language === 'zh-CN'
-          ? '无'
-          : 'None',
+      pdfContent: pdfText ? pdfText.substring(0, MAX_PDF_CONTENT_CHARS) : 'None',
       availableImages: availableImagesText,
-      researchContext: researchContext || (requirements.language === 'zh-CN' ? '无' : 'None'),
+      researchContext: researchContext || 'None',
       mediaGenerationPolicy,
       teacherContext,
+      userProfile: userProfileText,
     });
 
     if (!prompts) {
@@ -247,6 +280,7 @@ export async function POST(req: NextRequest) {
               };
 
           let parsedOutlines: SceneOutline[] = [];
+          let languageDirective: string | null = null;
           let lastError: string | undefined;
 
           for (let attempt = 1; attempt <= MAX_STREAM_RETRIES + 1; attempt++) {
@@ -255,9 +289,22 @@ export async function POST(req: NextRequest) {
 
               let fullText = '';
               parsedOutlines = [];
+              languageDirective = null;
 
               for await (const chunk of result.textStream) {
                 fullText += chunk;
+
+                // Try to extract language directive early
+                if (!languageDirective) {
+                  languageDirective = extractLanguageDirective(fullText);
+                  if (languageDirective) {
+                    const ldEvent = JSON.stringify({
+                      type: 'languageDirective',
+                      data: languageDirective,
+                    });
+                    controller.enqueue(encoder.encode(`data: ${ldEvent}\n\n`));
+                  }
+                }
 
                 // Try to extract new outlines from the accumulated text
                 const newOutlines = extractNewOutlines(fullText, parsedOutlines.length);
@@ -325,6 +372,7 @@ export async function POST(req: NextRequest) {
             const doneEvent = JSON.stringify({
               type: 'done',
               outlines: uniquifiedOutlines,
+              languageDirective: languageDirective || DEFAULT_LANGUAGE_DIRECTIVE,
             });
             controller.enqueue(encoder.encode(`data: ${doneEvent}\n\n`));
           } else {

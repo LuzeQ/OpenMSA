@@ -28,6 +28,7 @@ export interface StageListItem {
   sceneCount: number;
   createdAt: number;
   updatedAt: number;
+  interactiveMode?: boolean;
 }
 
 /**
@@ -44,10 +45,11 @@ export async function saveStageData(stageId: string, data: StageStoreData): Prom
       description: data.stage.description,
       createdAt: data.stage.createdAt || now,
       updatedAt: now,
-      language: data.stage.language,
+      languageDirective: data.stage.languageDirective,
       style: data.stage.style,
       currentSceneId: data.currentSceneId || undefined,
       agentIds: data.stage.agentIds,
+      interactiveMode: data.stage.interactiveMode,
     });
 
     // Delete old scenes first to avoid orphaned data
@@ -150,6 +152,7 @@ export async function listStages(): Promise<StageListItem[]> {
           sceneCount,
           createdAt: stage.createdAt,
           updatedAt: stage.updatedAt,
+          interactiveMode: stage.interactiveMode,
         };
       }),
     );
