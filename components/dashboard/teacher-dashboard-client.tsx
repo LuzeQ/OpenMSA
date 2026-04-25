@@ -4,10 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import {
   AlertTriangle,
-  ArrowRight,
   BarChart3,
   BookOpen,
   CheckCircle2,
+  ChevronDown,
   ExternalLink,
   Layers3,
   LayoutDashboard,
@@ -19,6 +19,7 @@ import {
   Settings,
   Siren,
   Sparkles,
+  Trash2,
   Users,
   Wand2,
   Workflow,
@@ -26,6 +27,7 @@ import {
 import { toast } from 'sonner';
 import { LogoutButton } from '@/components/auth/logout-button';
 import { SettingsDialog } from '@/components/settings';
+import { ThumbnailSlide } from '@/components/slide-renderer/components/ThumbnailSlide';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -42,6 +44,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import { getCurrentModelConfig } from '@/lib/utils/model-config';
 import { useSettingsStore } from '@/lib/store/settings';
+import { getFirstSlideByStages } from '@/lib/utils/stage-storage';
 import type {
   LearningCourseProgram,
   LearningLessonGenerationStatus,
@@ -51,6 +54,7 @@ import type {
   TeacherInterventionItem,
   TeacherLearningView,
 } from '@/lib/types/learning';
+import type { Slide } from '@/lib/types/slides';
 
 interface TeacherDashboardClientProps {
   username: string;
@@ -172,6 +176,17 @@ function formatDateTime(iso: string): string {
   });
 }
 
+function formatProgramDate(iso: string): string {
+  const date = new Date(iso);
+  const now = new Date();
+  const diffDays = Math.floor(Math.abs(now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 0) return '今天';
+  if (diffDays === 1) return '昨天';
+  if (diffDays < 7) return `${diffDays} 天前`;
+  return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+}
+
 function formatDuration(seconds: number): string {
   if (seconds <= 0) return '0m';
   const h = Math.floor(seconds / 3600);
@@ -290,6 +305,399 @@ function ProgressRing({
   );
 }
 
+function findProgramPreviewClassroomId(program: LearningCourseProgram): string | undefined {
+  for (const chapter of program.chapters) {
+    for (const lesson of chapter.lessons) {
+      if (lesson.classroomId) return lesson.classroomId;
+    }
+  }
+  return undefined;
+}
+
+function escapePreviewHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function compactPreviewText(value: string | undefined, maxLength: number): string {
+  const normalized = value?.replace(/\s+/g, ' ').trim() || '';
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
+function previewTextElement(
+  id: string,
+  content: string,
+  geometry: { left: number; top: number; width: number; height: number },
+  options: {
+    color?: string;
+    fill?: string;
+    fontSize?: number;
+    fontWeight?: number;
+    align?: 'left' | 'center';
+    lineHeight?: number;
+  } = {},
+): Slide['elements'][number] {
+  const align = options.align || 'left';
+  const fontSize = options.fontSize || 20;
+  const fontWeight = options.fontWeight || 500;
+
+  return {
+    id,
+    type: 'text',
+    left: geometry.left,
+    top: geometry.top,
+    width: geometry.width,
+    height: geometry.height,
+    rotate: 0,
+    content: `<p style="margin:0;text-align:${align};font-size:${fontSize}px;font-weight:${fontWeight};line-height:${options.lineHeight || 1.3};">${escapePreviewHtml(content)}</p>`,
+    defaultFontName: 'Microsoft YaHei',
+    defaultColor: options.color || '#0f172a',
+    fill: options.fill,
+    lineHeight: options.lineHeight || 1.3,
+    paragraphSpace: 0,
+  };
+}
+
+function previewRoundRectElement(
+  id: string,
+  geometry: { left: number; top: number; width: number; height: number },
+  fill: string,
+  outline?: { color: string; width: number },
+): Slide['elements'][number] {
+  return {
+    id,
+    type: 'shape',
+    left: geometry.left,
+    top: geometry.top,
+    width: geometry.width,
+    height: geometry.height,
+    rotate: 0,
+    viewBox: [240, 150],
+    path: 'M 18 0 H 222 Q 240 0 240 18 V 132 Q 240 150 222 150 H 18 Q 0 150 0 132 V 18 Q 0 0 18 0 Z',
+    fixedRatio: false,
+    fill,
+    outline: outline ? { style: 'solid', color: outline.color, width: outline.width } : undefined,
+  };
+}
+
+function createProgramPreviewSlide(program: LearningCourseProgram): Slide {
+  const chapters = program.chapters.slice(0, 3);
+  const fallbackItems = [
+    { title: '课程定位', detail: program.targetAudience || '核心概念与关键能力' },
+    { title: '章节路径', detail: `${program.chapters.length || 1} 个章节逐步推进` },
+    { title: '学习任务', detail: '讨论、练习与课堂生成内容' },
+  ];
+  const previewItems = chapters.length
+    ? chapters.map((chapter) => ({
+        title: chapter.title,
+        detail:
+          compactPreviewText(chapter.description, 34) ||
+          `${chapter.lessons.length} 个课时 · ${chapter.lessons[0]?.title || '学习任务'}`,
+      }))
+    : fallbackItems;
+  const paddedItems = [...previewItems, ...fallbackItems].slice(0, 3);
+  const cardFills = ['#dbeafe', '#dcfce7', '#fee2e2'];
+  const cardTitleColors = ['#1d4ed8', '#15803d', '#dc2626'];
+
+  const elements: Slide['elements'] = [
+    previewTextElement(
+      `program-preview-${program.id}-title`,
+      compactPreviewText(program.title, 34) || '课程体系',
+      { left: 92, top: 42, width: 816, height: 46 },
+      { align: 'center', fontSize: 30, fontWeight: 700, color: '#0f172a' },
+    ),
+    previewTextElement(
+      `program-preview-${program.id}-subtitle`,
+      '课程体系｜章节导览｜学习任务',
+      { left: 210, top: 94, width: 580, height: 28 },
+      { align: 'center', fontSize: 15, fontWeight: 500, color: '#64748b' },
+    ),
+  ];
+
+  paddedItems.forEach((item, index) => {
+    const left = 92 + index * 275;
+    elements.push(
+      previewRoundRectElement(
+        `program-preview-${program.id}-card-${index}`,
+        { left, top: 170, width: 240, height: 168 },
+        cardFills[index],
+        { color: '#e2e8f0', width: 1 },
+      ),
+      previewTextElement(
+        `program-preview-${program.id}-card-title-${index}`,
+        compactPreviewText(item.title, 14),
+        { left: left + 20, top: 200, width: 200, height: 32 },
+        { align: 'center', fontSize: 21, fontWeight: 700, color: cardTitleColors[index] },
+      ),
+      previewTextElement(
+        `program-preview-${program.id}-card-detail-${index}`,
+        compactPreviewText(item.detail, 42),
+        { left: left + 28, top: 247, width: 184, height: 60 },
+        { align: 'center', fontSize: 15, fontWeight: 500, color: '#475569', lineHeight: 1.45 },
+      ),
+    );
+  });
+
+  elements.push(
+    previewRoundRectElement(
+      `program-preview-${program.id}-summary`,
+      { left: 165, top: 390, width: 670, height: 42 },
+      '#e2e8f0',
+    ),
+    previewTextElement(
+      `program-preview-${program.id}-summary-text`,
+      compactPreviewText(program.description || program.targetAudience || '点击查看课程详情、章节与课时安排', 58),
+      { left: 190, top: 400, width: 620, height: 25 },
+      { align: 'center', fontSize: 14, fontWeight: 500, color: '#475569' },
+    ),
+  );
+
+  return {
+    id: `program-preview-${program.id}`,
+    viewportSize: 1000,
+    viewportRatio: 0.5625,
+    theme: {
+      backgroundColor: '#eef6ff',
+      themeColors: ['#2563eb', '#16a34a', '#dc2626', '#64748b'],
+      fontColor: '#0f172a',
+      fontName: 'Microsoft YaHei',
+    },
+    background: {
+      type: 'gradient',
+      gradient: {
+        type: 'linear',
+        rotate: 135,
+        colors: [
+          { pos: 0, color: '#f8fbff' },
+          { pos: 58, color: '#eaf3ff' },
+          { pos: 100, color: '#f5f7fb' },
+        ],
+      },
+    },
+    elements,
+    type: 'cover',
+  };
+}
+
+function ProgramPreviewMedia({
+  slide,
+  program,
+  className,
+}: {
+  slide?: Slide;
+  program: LearningCourseProgram;
+  className?: string;
+}) {
+  const thumbRef = useRef<HTMLDivElement>(null);
+  const [thumbWidth, setThumbWidth] = useState(0);
+  const previewSlide = useMemo(() => slide || createProgramPreviewSlide(program), [program, slide]);
+
+  useEffect(() => {
+    const el = thumbRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      setThumbWidth(Math.round(entry.contentRect.width));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  return (
+    <div
+      ref={thumbRef}
+      className={cn(
+        'relative aspect-[16/9] overflow-hidden rounded-2xl bg-slate-100 dark:bg-slate-800/80',
+        className,
+      )}
+    >
+      {thumbWidth > 0 ? (
+        <ThumbnailSlide
+          slide={previewSlide}
+          size={thumbWidth}
+          viewportSize={previewSlide.viewportSize ?? 1000}
+          viewportRatio={previewSlide.viewportRatio ?? 0.5625}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function ProgramThumbnailCard({
+  program,
+  slide,
+  totalLessonCount,
+  generatedLessonCount,
+  pendingApplicationCount,
+  onOpen,
+}: {
+  program: LearningCourseProgram;
+  slide?: Slide;
+  totalLessonCount: number;
+  generatedLessonCount: number;
+  pendingApplicationCount: number;
+  onOpen: () => void;
+}) {
+  return (
+    <button type="button" onClick={onOpen} className="group block w-full text-left outline-none">
+      <ProgramPreviewMedia
+        slide={slide}
+        program={program}
+        className="transition-transform duration-200 group-hover:scale-[1.02] group-focus-visible:ring-2 group-focus-visible:ring-blue-500 group-focus-visible:ring-offset-2"
+      />
+
+      <div className="mt-2.5 flex min-w-0 items-center gap-2 px-1">
+        <span className="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-600 dark:bg-violet-900/30 dark:text-violet-300">
+          {totalLessonCount} 课时 · {formatProgramDate(program.updatedAt)}
+        </span>
+        <p className="min-w-0 truncate text-[15px] font-medium text-slate-900 dark:text-slate-100">
+          {program.title}
+        </p>
+      </div>
+
+      <div className="mt-1 flex min-w-0 items-center gap-2 px-1 text-[11px] text-slate-500">
+        <span>{program.published ? '已发布' : '草稿'}</span>
+        <span>·</span>
+        <span>已生成 {generatedLessonCount}</span>
+        {pendingApplicationCount > 0 && (
+          <>
+            <span>·</span>
+            <span>申请 {pendingApplicationCount}</span>
+          </>
+        )}
+      </div>
+    </button>
+  );
+}
+
+function ProgramExpandedHeader({
+  item,
+  slide,
+  courseProgress,
+  totalLessonCount,
+  generatedLessonCount,
+  isDeleting,
+  onCollapse,
+  onLoadDraft,
+  onPublish,
+  onAssign,
+  onDelete,
+}: {
+  item: TeacherLearningView['programs'][number];
+  slide?: Slide;
+  courseProgress: number;
+  totalLessonCount: number;
+  generatedLessonCount: number;
+  isDeleting: boolean;
+  onCollapse: () => void;
+  onLoadDraft: () => void;
+  onPublish: () => void;
+  onAssign: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="grid gap-4 md:grid-cols-[260px_minmax(0,1fr)]">
+      <button
+        type="button"
+        onClick={onCollapse}
+        className="group block w-full text-left outline-none"
+        aria-label="收起课程详情"
+      >
+        <ProgramPreviewMedia
+          slide={slide}
+          program={item.program}
+          className="transition-transform duration-200 group-hover:scale-[1.02] group-focus-visible:ring-2 group-focus-visible:ring-blue-500 group-focus-visible:ring-offset-2"
+        />
+      </button>
+
+      <div className="flex min-w-0 flex-col justify-between gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="truncate text-lg font-semibold">{item.program.title}</h2>
+              <Badge variant={item.program.published ? 'default' : 'outline'}>
+                {item.program.published ? '已发布' : '草稿'}
+              </Badge>
+              {item.pendingApplicationCount > 0 && (
+                <Badge variant="secondary">申请 {item.pendingApplicationCount}</Badge>
+              )}
+            </div>
+            <p className="mt-1 line-clamp-2 max-w-2xl text-sm text-slate-500">
+              {item.program.description || item.program.targetAudience || '暂无课程简介'}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <ProgressRing value={courseProgress} className="size-14" />
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button size="sm" variant="outline" onClick={onLoadDraft}>
+                载入编辑
+              </Button>
+              {!item.program.published ? (
+                <Button size="sm" onClick={onPublish}>
+                  发布
+                </Button>
+              ) : (
+                <Button size="sm" variant="outline" onClick={onAssign}>
+                  派发
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                className="text-rose-600 hover:text-rose-700 dark:text-rose-300"
+                onClick={onDelete}
+                disabled={isDeleting}
+              >
+                {isDeleting ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Trash2 className="size-4" />
+                )}
+                删除
+              </Button>
+              <Button size="sm" variant="ghost" onClick={onCollapse}>
+                收起
+                <ChevronDown className="size-4 rotate-180" />
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2 text-xs text-slate-500">
+          <span className="rounded-full bg-slate-100 px-3 py-1 dark:bg-slate-800">
+            {item.program.chapters.length} 章节
+          </span>
+          <span className="rounded-full bg-slate-100 px-3 py-1 dark:bg-slate-800">
+            {totalLessonCount} 课时
+          </span>
+          <span className="rounded-full bg-slate-100 px-3 py-1 dark:bg-slate-800">
+            已生成 {generatedLessonCount}
+          </span>
+          <span className="rounded-full bg-slate-100 px-3 py-1 dark:bg-slate-800">
+            已派发 {item.assignedCount}
+          </span>
+          <span className="rounded-full bg-slate-100 px-3 py-1 dark:bg-slate-800">
+            学习中 {item.activeCount}
+          </span>
+          <span className="rounded-full bg-slate-100 px-3 py-1 dark:bg-slate-800">
+            已完成 {item.completedCount}
+          </span>
+        </div>
+
+        <div className="truncate text-xs text-slate-500">
+          {item.publishWarnings.length > 0
+            ? item.publishWarnings[0].message
+            : '章节、课时与运营详情'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function buildModelHeaders(options?: { forceRichMedia?: boolean }) {
   const modelConfig = getCurrentModelConfig();
   const settings = useSettingsStore.getState();
@@ -360,6 +768,10 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
   const [selectedLessonRef, setSelectedLessonRef] = useState<TeacherLessonRef | null>(null);
   const [selectedAssignmentId, setSelectedAssignmentId] = useState<string | null>(null);
   const [assignProgramId, setAssignProgramId] = useState<string | null>(null);
+  const [deletingProgramId, setDeletingProgramId] = useState<string | null>(null);
+  const [expandedChapterKeys, setExpandedChapterKeys] = useState<Record<string, boolean>>({});
+  const [expandedProgramId, setExpandedProgramId] = useState<string | null>(null);
+  const [programPreviewSlides, setProgramPreviewSlides] = useState<Record<string, Slide>>({});
   const activePollingTaskIdsRef = useRef<Set<string>>(new Set());
 
   const fetchData = useCallback(async () => {
@@ -381,6 +793,42 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
   useEffect(() => {
     void fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    if (!data?.programs.length) {
+      setProgramPreviewSlides({});
+      return;
+    }
+
+    const previewClassroomIdsByProgram = Object.fromEntries(
+      data.programs.map((item) => [item.program.id, findProgramPreviewClassroomId(item.program)]),
+    );
+    const uniqueClassroomIds = [
+      ...new Set(
+        Object.values(previewClassroomIdsByProgram).filter(
+          (value): value is string => typeof value === 'string' && value.length > 0,
+        ),
+      ),
+    ];
+    let cancelled = false;
+
+    void (async () => {
+      const slides = uniqueClassroomIds.length ? await getFirstSlideByStages(uniqueClassroomIds) : {};
+      if (cancelled) return;
+
+      const next: Record<string, Slide> = {};
+      for (const [programId, classroomId] of Object.entries(previewClassroomIdsByProgram)) {
+        if (classroomId && slides[classroomId]) {
+          next[programId] = slides[classroomId];
+        }
+      }
+      setProgramPreviewSlides(next);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [data]);
 
   const pendingApplications = useMemo(
     () => data?.applications.filter((item) => item.status === 'pending') || [],
@@ -477,6 +925,28 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
         })
         .slice(0, 8),
     [data],
+  );
+
+  const panelCounts = useMemo<Record<TeacherPanel, number>>(
+    () => ({
+      operate:
+        generationQueue.length +
+        (data?.interventionInbox.length || 0) +
+        unpublishedCount +
+        unassignedPublishedCount,
+      design: stats.totalPrograms,
+      insights: topRiskRows.length,
+      applications: pendingApplications.length,
+    }),
+    [
+      data,
+      generationQueue.length,
+      pendingApplications.length,
+      stats.totalPrograms,
+      topRiskRows.length,
+      unpublishedCount,
+      unassignedPublishedCount,
+    ],
   );
 
   const updateDraft = <K extends keyof ProgramDraft>(key: K, value: ProgramDraft[K]) => {
@@ -1159,6 +1629,78 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
     }
   };
 
+  const onDeleteProgram = async (programItem: TeacherLearningView['programs'][number]) => {
+    if (deletingProgramId === programItem.program.id) return;
+
+    const confirmed = window.confirm(
+      [
+        `确认删除课程体系「${programItem.program.title}」吗？`,
+        '',
+        '这会同时删除：',
+        `- 课程体系本身`,
+        `- ${programItem.assignedCount} 条学生派发记录`,
+        `- ${programItem.pendingApplicationCount} 条申请记录`,
+        '- 相关课时生成任务记录',
+        '',
+        '已生成的课堂内容页面不会自动删除。',
+      ].join('\n'),
+    );
+
+    if (!confirmed) return;
+
+    setDeletingProgramId(programItem.program.id);
+    try {
+      const res = await fetch(`/api/learning/syllabi/${programItem.program.id}`, {
+        method: 'DELETE',
+      });
+      const payload = (await res.json()) as { success: boolean; error?: string; title?: string };
+      if (!res.ok || !payload.success) {
+        throw new Error(payload.error || '删除课程体系失败');
+      }
+
+      if (editingProgramId === programItem.program.id) {
+        resetDraft();
+        setActivePanel('operate');
+      }
+      if (selectedLessonRef?.programId === programItem.program.id) {
+        setSelectedLessonRef(null);
+      }
+      if (expandedProgramId === programItem.program.id) {
+        setExpandedProgramId(null);
+      }
+      if (assignProgramId === programItem.program.id) {
+        setAssignProgramId(null);
+      }
+      setSelectedAssignmentId(null);
+      setSelectedStudentIdsByProgram((prev) => {
+        const next = { ...prev };
+        delete next[programItem.program.id];
+        return next;
+      });
+      setAnalyticsByProgram((prev) => {
+        const next = { ...prev };
+        delete next[programItem.program.id];
+        return next;
+      });
+      setExpandedChapterKeys((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((key) => {
+          if (key.startsWith(`${programItem.program.id}:`)) {
+            delete next[key];
+          }
+        });
+        return next;
+      });
+
+      await fetchData();
+      toast.success(`课程体系「${payload.title || programItem.program.title}」已删除`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '删除课程体系失败');
+    } finally {
+      setDeletingProgramId(null);
+    }
+  };
+
   const onBindLessonClassroom = async (
     programId: string,
     lessonId: string,
@@ -1369,10 +1911,10 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
           transition={{ delay: 0.08 }}
           className="rounded-[2rem] border border-white/60 bg-white/80 p-5 shadow-2xl shadow-black/[0.04] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80 md:p-7"
         >
-          <div className="grid gap-6 lg:grid-cols-[1.25fr_0.75fr]">
-            <div className="space-y-5">
+          <div className="space-y-5">
+            <div className="min-w-0 space-y-5">
               <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
+                <div className="min-w-0">
                   <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 dark:bg-blue-950/40 dark:text-blue-200">
                     <Radio className="size-3.5" />
                     今日运营台
@@ -1408,34 +1950,6 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
                 })}
               </div>
             </div>
-
-            <div className="grid gap-3">
-              {[
-                { label: '申请待审', value: pendingApplications.length, hint: '需要老师通过或拒绝', panel: 'applications' as TeacherPanel },
-                { label: '学生待介入', value: data.interventionInbox.length, hint: '卡点与风险收件箱', panel: 'operate' as TeacherPanel },
-                { label: '生成异常/进行中', value: generationQueue.length, hint: '可查看进度或断点续跑', panel: 'operate' as TeacherPanel },
-                { label: '未发布/未派发', value: unpublishedCount + unassignedPublishedCount, hint: '影响学生是否可学习', panel: 'operate' as TeacherPanel },
-              ].map((task, index) => (
-                <motion.button
-                  key={task.label}
-                  type="button"
-                  initial={{ opacity: 0, x: 12 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.12 + index * 0.04 }}
-                  onClick={() => setActivePanel(task.panel)}
-                  className="group flex items-center justify-between rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 text-left transition hover:-translate-y-0.5 hover:bg-white hover:shadow-md dark:border-slate-800/70 dark:bg-slate-950/40 dark:hover:bg-slate-900"
-                >
-                  <div>
-                    <div className="text-sm font-medium">{task.label}</div>
-                    <div className="text-xs text-slate-500">{task.hint}</div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-2xl font-semibold">{task.value}</span>
-                    <ArrowRight className="size-4 text-slate-400 transition group-hover:translate-x-1" />
-                  </div>
-                </motion.button>
-              ))}
-            </div>
           </div>
         </motion.section>
 
@@ -1447,6 +1961,7 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
             { id: 'applications' as TeacherPanel, label: '申请审核', icon: Users },
           ].map((item) => {
             const Icon = item.icon;
+            const count = panelCounts[item.id];
             return (
               <button
                 key={item.id}
@@ -1461,156 +1976,212 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
               >
                 <Icon className="size-4" />
                 {item.label}
+                {count > 0 && (
+                  <span
+                    className={cn(
+                      'inline-flex min-w-5 items-center justify-center rounded-full px-1.5 py-0.5 text-[11px] font-semibold',
+                      activePanel === item.id
+                        ? 'bg-white/15 text-white dark:bg-slate-900/15 dark:text-slate-950'
+                        : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-200',
+                    )}
+                  >
+                    {count}
+                  </span>
+                )}
               </button>
             );
           })}
         </div>
 
         {activePanel === 'operate' && (
-          <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
-            <section className="space-y-4">
+          <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]">
+            <section className="min-w-0">
               {data.programs.length === 0 ? (
                 <div className="rounded-[2rem] border border-dashed border-slate-300 bg-white/70 p-8 text-center text-sm text-slate-500 backdrop-blur-xl dark:border-slate-700 dark:bg-slate-900/70">
                   还没有课程体系。点击顶部“AI 生成体系”或“新建课程”开始。
                 </div>
               ) : (
-                data.programs.map((item, programIndex) => {
-                  const analyticsForProgram = analyticsByProgram[item.program.id];
-                  const courseProgress = item.assignedCount
-                    ? Math.round((item.completedCount / item.assignedCount) * 100)
-                    : 0;
+                <div className="grid grid-cols-2 gap-x-5 gap-y-8 md:grid-cols-3 2xl:grid-cols-4">
+                  {data.programs.map((item, programIndex) => {
+                    const analyticsForProgram = analyticsByProgram[item.program.id];
+                    const courseProgress = item.assignedCount
+                      ? Math.round((item.completedCount / item.assignedCount) * 100)
+                      : 0;
+                    const totalLessonCount = item.program.chapters.reduce(
+                      (sum, chapter) => sum + chapter.lessons.length,
+                      0,
+                    );
+                    const generatedLessonCount = item.program.chapters.reduce(
+                      (sum, chapter) =>
+                        sum +
+                        chapter.lessons.filter((lesson) => lesson.generationStatus === 'succeeded')
+                          .length,
+                      0,
+                    );
+                    const isProgramExpanded = expandedProgramId === item.program.id;
 
-                  return (
-                    <motion.article
-                      key={item.program.id}
-                      initial={{ opacity: 0, y: 16 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: programIndex * 0.04 }}
-                      className="overflow-hidden rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80"
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-4">
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <h2 className="truncate text-lg font-semibold">{item.program.title}</h2>
-                            <Badge variant={item.program.published ? 'default' : 'outline'}>
-                              {item.program.published ? '已发布' : '草稿'}
-                            </Badge>
-                            {item.pendingApplicationCount > 0 && (
-                              <Badge variant="secondary">申请 {item.pendingApplicationCount}</Badge>
-                            )}
-                          </div>
-                          <p className="mt-1 line-clamp-2 max-w-2xl text-xs text-slate-500">
-                            {item.program.description || item.program.targetAudience || '暂无课程简介'}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <ProgressRing value={courseProgress} className="size-14" />
-                          <div className="flex flex-wrap gap-2">
-                            <Button size="sm" variant="outline" onClick={() => loadProgramToDraft(item.program)}>
-                              载入编辑
-                            </Button>
-                            {!item.program.published ? (
-                              <Button size="sm" onClick={() => onPrepublishAndPublish(item.program.id)}>
-                                发布
-                              </Button>
-                            ) : (
-                              <Button size="sm" variant="outline" onClick={() => setAssignProgramId(item.program.id)}>
-                                派发
-                              </Button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
+                    return (
+                      <motion.article
+                        key={item.program.id}
+                        initial={{ opacity: 0, y: 16 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: programIndex * 0.04 }}
+                        className={cn(
+                          'min-w-0',
+                          isProgramExpanded && 'col-span-2 md:col-span-3 2xl:col-span-4',
+                        )}
+                      >
+                        {!isProgramExpanded ? (
+                          <ProgramThumbnailCard
+                            program={item.program}
+                            slide={programPreviewSlides[item.program.id]}
+                            totalLessonCount={totalLessonCount}
+                            generatedLessonCount={generatedLessonCount}
+                            pendingApplicationCount={item.pendingApplicationCount}
+                            onOpen={() => setExpandedProgramId(item.program.id)}
+                          />
+                        ) : (
+                          <div className="min-w-0 overflow-hidden rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80">
+                            <ProgramExpandedHeader
+                              item={item}
+                              slide={programPreviewSlides[item.program.id]}
+                              courseProgress={courseProgress}
+                              totalLessonCount={totalLessonCount}
+                              generatedLessonCount={generatedLessonCount}
+                              isDeleting={deletingProgramId === item.program.id}
+                              onCollapse={() => setExpandedProgramId(null)}
+                              onLoadDraft={() => loadProgramToDraft(item.program)}
+                              onPublish={() => onPrepublishAndPublish(item.program.id)}
+                              onAssign={() => setAssignProgramId(item.program.id)}
+                              onDelete={() => onDeleteProgram(item)}
+                            />
 
-                      <div className="mt-4 flex flex-wrap gap-2 text-xs text-slate-500">
-                        <span className="rounded-full bg-slate-100 px-3 py-1 dark:bg-slate-800">
-                          已派发 {item.assignedCount}
-                        </span>
-                        <span className="rounded-full bg-slate-100 px-3 py-1 dark:bg-slate-800">
-                          学习中 {item.activeCount}
-                        </span>
-                        <span className="rounded-full bg-slate-100 px-3 py-1 dark:bg-slate-800">
-                          已完成 {item.completedCount}
-                        </span>
-                      </div>
+                            <div className="mt-5 space-y-3 border-t border-slate-200/70 pt-5 dark:border-slate-800/70">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                                  章节与课时
+                                </div>
+                                <div className="text-xs text-slate-500">
+                                  {item.program.chapters.length} 章 · {totalLessonCount} 课时 · 已生成{' '}
+                                  {generatedLessonCount}
+                                </div>
+                              </div>
+                              <div className="space-y-2">
+                                {item.program.chapters.map((chapter) => {
+                                  const chapterKey = `${item.program.id}:${chapter.id}`;
+                                  const isExpanded = Boolean(expandedChapterKeys[chapterKey]);
+                                  const chapterGeneratedCount = chapter.lessons.filter(
+                                    (lesson) => lesson.generationStatus === 'succeeded',
+                                  ).length;
 
-                      {item.publishWarnings.length > 0 && (
-                        <div className="mt-4 rounded-2xl border border-amber-200/70 bg-amber-50/80 p-3 text-xs text-amber-800 dark:border-amber-800/70 dark:bg-amber-950/20 dark:text-amber-200">
-                          {item.publishWarnings[0].message}
-                        </div>
-                      )}
+                                  return (
+                                    <div
+                                      key={chapter.id}
+                                      className="rounded-2xl border border-slate-200/70 bg-slate-50/80 dark:border-slate-800/70 dark:bg-slate-950/40"
+                                    >
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setExpandedChapterKeys((prev) => ({
+                                            ...prev,
+                                            [chapterKey]: !prev[chapterKey],
+                                          }))
+                                        }
+                                        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+                                      >
+                                        <div className="min-w-0">
+                                          <div className="flex items-center gap-2 text-sm font-medium">
+                                            <BookOpen className="size-4 shrink-0 text-slate-400" />
+                                            <span className="truncate">{chapter.title}</span>
+                                          </div>
+                                          <div className="mt-1 text-xs text-slate-500">
+                                            {chapter.lessons.length} 个课时 · 已生成 {chapterGeneratedCount}
+                                          </div>
+                                        </div>
+                                        <div className="flex items-center gap-2 text-xs text-slate-500">
+                                          <span>{isExpanded ? '收起课时' : '展开课时'}</span>
+                                          <ChevronDown
+                                            className={cn(
+                                              'size-4 shrink-0 transition-transform',
+                                              isExpanded && 'rotate-180',
+                                            )}
+                                          />
+                                        </div>
+                                      </button>
 
-                      <div className="mt-5 flex gap-4 overflow-x-auto pb-1">
-                        {item.program.chapters.map((chapter) => (
-                          <div key={chapter.id} className="min-w-[240px] flex-1 rounded-2xl bg-slate-50/80 p-3 dark:bg-slate-950/40">
-                            <div className="mb-3 flex items-center gap-2 text-sm font-medium">
-                              <BookOpen className="size-4 text-slate-400" />
-                              <span className="line-clamp-1">{chapter.title}</span>
-                            </div>
-                            <div className="grid grid-cols-1 gap-2">
-                              {chapter.lessons.map((lesson) => (
-                                <button
-                                  key={lesson.id}
-                                  type="button"
-                                  onClick={() =>
-                                    setSelectedLessonRef({
-                                      programId: item.program.id,
-                                      chapterId: chapter.id,
-                                      lessonId: lesson.id,
-                                    })
-                                  }
-                                  className={cn(
-                                    'group flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left text-xs transition hover:-translate-y-0.5 hover:shadow-sm',
-                                    lessonNodeTone(lesson.generationStatus),
-                                  )}
+                                      {isExpanded && (
+                                        <div className="border-t border-slate-200/70 px-4 pb-4 pt-3 dark:border-slate-800/70">
+                                          <div className="grid gap-2 lg:grid-cols-2">
+                                            {chapter.lessons.map((lesson) => (
+                                              <button
+                                                key={lesson.id}
+                                                type="button"
+                                                onClick={() =>
+                                                  setSelectedLessonRef({
+                                                    programId: item.program.id,
+                                                    chapterId: chapter.id,
+                                                    lessonId: lesson.id,
+                                                  })
+                                                }
+                                                className={cn(
+                                                  'group flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left text-xs transition hover:-translate-y-0.5 hover:shadow-sm',
+                                                  lessonNodeTone(lesson.generationStatus),
+                                                )}
+                                              >
+                                                <span className="line-clamp-1">{lesson.title}</span>
+                                                <span className="shrink-0 text-[10px] opacity-70">
+                                                  {lessonGenerationStatusText(lesson.generationStatus)}
+                                                </span>
+                                              </button>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+
+                              <div className="mt-4 flex flex-wrap gap-2">
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => fetchProgramAnalytics(item.program.id)}
+                                  disabled={analyticsLoadingByProgram[item.program.id]}
                                 >
-                                  <span className="line-clamp-1">{lesson.title}</span>
-                                  <span className="shrink-0 text-[10px] opacity-70">
-                                    {lessonGenerationStatusText(lesson.generationStatus)}
-                                  </span>
-                                </button>
-                              ))}
+                                  {analyticsLoadingByProgram[item.program.id] ? (
+                                    <Loader2 className="size-4 animate-spin" />
+                                  ) : (
+                                    <RefreshCw className="size-4" />
+                                  )}
+                                  查看分析
+                                </Button>
+                              </div>
+
+                              {analyticsForProgram && (
+                                <div className="mt-4 grid gap-2 rounded-2xl border border-slate-200/70 bg-white/60 p-3 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-950/30 md:grid-cols-3">
+                                  <div>学生数 {analyticsForProgram.summary.studentCount}</div>
+                                  <div>完成率 {Math.round(analyticsForProgram.summary.completionRate * 100)}%</div>
+                                  <div>
+                                    正确率{' '}
+                                    {analyticsForProgram.summary.averageAccuracy === null
+                                      ? 'N/A'
+                                      : `${Math.round(analyticsForProgram.summary.averageAccuracy * 100)}%`}
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           </div>
-                        ))}
-                      </div>
-
-                      <div className="mt-4 flex flex-wrap gap-2">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => fetchProgramAnalytics(item.program.id)}
-                          disabled={analyticsLoadingByProgram[item.program.id]}
-                        >
-                          {analyticsLoadingByProgram[item.program.id] ? (
-                            <Loader2 className="size-4 animate-spin" />
-                          ) : (
-                            <RefreshCw className="size-4" />
-                          )}
-                          查看分析
-                        </Button>
-                      </div>
-
-                      {analyticsForProgram && (
-                        <div className="mt-4 grid gap-2 rounded-2xl border border-slate-200/70 bg-white/60 p-3 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-950/30 md:grid-cols-3">
-                          <div>学生数 {analyticsForProgram.summary.studentCount}</div>
-                          <div>完成率 {Math.round(analyticsForProgram.summary.completionRate * 100)}%</div>
-                          <div>
-                            正确率{' '}
-                            {analyticsForProgram.summary.averageAccuracy === null
-                              ? 'N/A'
-                              : `${Math.round(analyticsForProgram.summary.averageAccuracy * 100)}%`}
-                          </div>
-                        </div>
-                      )}
-                    </motion.article>
-                  );
-                })
+                        )}
+                      </motion.article>
+                    );
+                  })}
+                </div>
               )}
             </section>
 
-            <aside className="space-y-4">
-              <div className="rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80">
+            <aside className="min-w-0 space-y-4 xl:sticky xl:top-6">
+              <div className="min-w-0 rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80">
                 <div className="mb-4 flex items-center justify-between">
                   <div>
                     <h2 className="font-semibold">生成队列</h2>
@@ -1618,7 +2189,7 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
                   </div>
                   <Sparkles className="size-5 text-blue-500" />
                 </div>
-                <div className="space-y-2">
+                <div className="min-w-0 space-y-2">
                   {generationQueue.length === 0 ? (
                     <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500 dark:bg-slate-950/40">
                       暂无生成中或失败任务。
@@ -1663,7 +2234,7 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
                 </div>
               </div>
 
-              <div className="rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80">
+              <div className="min-w-0 rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80">
                 <div className="mb-4 flex items-center justify-between">
                   <div>
                     <h2 className="font-semibold">干预收件箱</h2>
@@ -1671,7 +2242,7 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
                   </div>
                   <Siren className="size-5 text-rose-500" />
                 </div>
-                <div className="space-y-2">
+                <div className="min-w-0 space-y-2">
                   {data.interventionInbox.length === 0 ? (
                     <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500 dark:bg-slate-950/40">
                       暂无待介入事项。

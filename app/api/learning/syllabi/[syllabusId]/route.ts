@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { getCurrentUserFromSession } from '@/lib/server/auth/current-user';
 import {
+  deleteLearningProgram,
   getLearningProgramDetail,
   updateLearningProgramStructure,
 } from '@/lib/server/learning-store';
@@ -137,6 +138,34 @@ export async function PATCH(
     if (error instanceof z.ZodError) {
       return apiError('INVALID_REQUEST', 400, error.issues[0]?.message || 'Invalid request');
     }
+    return mapLearningDomainError(error);
+  }
+}
+
+export async function DELETE(
+  _req: Request,
+  context: { params: Promise<{ syllabusId: string }> },
+) {
+  try {
+    const user = await getCurrentUserFromSession();
+    if (!user) {
+      return apiError('INVALID_REQUEST', 401, 'Authentication required');
+    }
+    if (!ensureTeacherOrAdmin(user.role)) {
+      return apiError('INVALID_REQUEST', 403, 'Permission denied');
+    }
+
+    const { syllabusId } = await context.params;
+    const syllabus = await deleteLearningProgram({
+      teacherId: user.id,
+      programId: syllabusId,
+    });
+
+    return apiSuccess({
+      deletedProgramId: syllabus.id,
+      title: syllabus.title,
+    });
+  } catch (error) {
     return mapLearningDomainError(error);
   }
 }

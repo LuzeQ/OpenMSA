@@ -1460,6 +1460,23 @@ export async function updateLearningProgramStructure(
   return program;
 }
 
+export async function deleteLearningProgram(input: {
+  teacherId: string;
+  programId: string;
+}): Promise<LearningCourseProgram> {
+  const store = await readStore();
+  const program = findProgramOrThrow(store, input.programId);
+  ensureTeacherOwnsProgram(program, input.teacherId);
+
+  store.programs = store.programs.filter((item) => item.id !== program.id);
+  store.assignments = store.assignments.filter((item) => item.programId !== program.id);
+  store.applications = store.applications.filter((item) => item.programId !== program.id);
+  store.generationTasks = store.generationTasks.filter((item) => item.programId !== program.id);
+
+  await writeStore(store);
+  return program;
+}
+
 export interface BindLearningLessonClassroomInput {
   teacherId: string;
   programId: string;

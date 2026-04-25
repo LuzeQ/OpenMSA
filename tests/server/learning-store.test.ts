@@ -417,6 +417,82 @@ describe('learning store', () => {
     expect(refreshedLesson.generationStatus).toBe('succeeded');
   });
 
+  it('deletes a program together with related assignments, applications, and generation tasks', async () => {
+    const {
+      applyLearningProgram,
+      assignLearningProgramToStudents,
+      createLearningLessonGenerationTask,
+      createLearningProgram,
+      deleteLearningProgram,
+      getLearningLessonGenerationTask,
+      getStudentLearningView,
+      getTeacherLearningView,
+      publishLearningProgram,
+    } = await import('@/lib/server/learning-store');
+
+    const program = await createLearningProgram({
+      teacherId: TEACHER.id,
+      teacherUsername: TEACHER.username,
+      title: '待删除课程体系',
+      description: '删除时应清理关联记录',
+      chapters: [
+        {
+          title: '章节一',
+          lessons: [{ title: '课时一', classroomId: 'classroom_delete_001' }],
+        },
+      ],
+    });
+
+    await publishLearningProgram({
+      teacherId: TEACHER.id,
+      programId: program.id,
+      confirmPublish: true,
+    });
+
+    await assignLearningProgramToStudents({
+      teacherId: TEACHER.id,
+      programId: program.id,
+      studentIds: [STUDENT.id],
+    });
+
+    await applyLearningProgram({
+      studentId: STUDENT_2.id,
+      studentUsername: STUDENT_2.username,
+      programId: program.id,
+      note: '希望加入学习',
+    });
+
+    const task = await createLearningLessonGenerationTask({
+      teacherId: TEACHER.id,
+      programId: program.id,
+      lessonId: program.chapters[0].lessons[0].id,
+      requirementsText: '删除后应同步清理任务',
+    });
+
+    await deleteLearningProgram({
+      teacherId: TEACHER.id,
+      programId: program.id,
+    });
+
+    const teacherView = await getTeacherLearningView(TEACHER);
+    expect(teacherView.programs.some((item) => item.program.id === program.id)).toBe(false);
+    expect(teacherView.assignments.some((item) => item.program.id === program.id)).toBe(false);
+    expect(teacherView.applications.some((item) => item.programId === program.id)).toBe(false);
+
+    const studentView = await getStudentLearningView(STUDENT);
+    expect(studentView.assignments.some((item) => item.program.id === program.id)).toBe(false);
+
+    const applicantView = await getStudentLearningView(STUDENT_2);
+    expect(applicantView.applications.some((item) => item.programId === program.id)).toBe(false);
+
+    await expect(
+      getLearningLessonGenerationTask({
+        teacherId: TEACHER.id,
+        generationTaskId: task.id,
+      }),
+    ).rejects.toMatchObject({ code: 'GENERATION_TASK_NOT_FOUND' });
+  });
+
   it('aggregates lesson-level syllabus analytics', async () => {
     const {
       acceptLearningAssignment,
