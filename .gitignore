@@ -8,6 +8,7 @@ CLAUDE.local.md
 /node_modules
 /openclaw/node_modules
 /openclaw/package-lock.json
+/.pnpm-store
 /.pnp
 .pnp.*
 .yarn/*

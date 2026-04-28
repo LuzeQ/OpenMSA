@@ -33,6 +33,17 @@ export type LearningWarningLevel = 'info' | 'warning';
 
 export type LearningRiskLevel = 'low' | 'medium' | 'high';
 
+export type LearningWeaknessSeverity = 'low' | 'medium' | 'high';
+
+export type LearningRecommendationType =
+  | 'complete_profile'
+  | 'strengthen_weakness'
+  | 'review_risk'
+  | 'apply_program'
+  | 'continue_learning';
+
+export type LearningRecommendationPriority = 'low' | 'medium' | 'high';
+
 export interface LearningPublishWarning {
   code: string;
   level: LearningWarningLevel;
@@ -201,12 +212,60 @@ export interface LearningProgramApplication {
   reviewNote?: string;
 }
 
+export interface LearningGoal {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LearningPreference {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LearningWeakness {
+  id: string;
+  title: string;
+  severity: LearningWeaknessSeverity;
+  evidence?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LearningStudentProfile {
+  studentId: string;
+  studentUsername: string;
+  goals: LearningGoal[];
+  preferences: LearningPreference[];
+  weaknesses: LearningWeakness[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LearningRecommendation {
+  id: string;
+  type: LearningRecommendationType;
+  priority: LearningRecommendationPriority;
+  title: string;
+  description: string;
+  reason: string;
+  actionLabel?: string;
+  programId?: string;
+  assignmentId?: string;
+  chapterId?: string;
+  lessonId?: string;
+}
+
 export interface LearningStoreData {
-  version: 2;
+  version: 3;
   programs: LearningCourseProgram[];
   assignments: LearningAssignment[];
   applications: LearningProgramApplication[];
   generationTasks: LearningLessonGenerationTask[];
+  studentProfiles: LearningStudentProfile[];
 }
 
 export interface LearningLessonAnalyticsRow {
@@ -304,6 +363,7 @@ export interface TeacherLearningView {
   interventionInbox: TeacherInterventionItem[];
   students: Array<{ id: string; username: string; role: string }>;
   applications: LearningProgramApplication[];
+  studentProfiles: LearningStudentProfile[];
 }
 
 export interface StudentCourseView {
@@ -322,6 +382,8 @@ export interface StudentLearningView {
   assignments: StudentCourseView[];
   availablePrograms: LearningCourseProgram[];
   applications: LearningProgramApplication[];
+  profile?: LearningStudentProfile;
+  recommendations: LearningRecommendation[];
 }
 
 // Backward-compatible aliases used by pre-existing code paths.

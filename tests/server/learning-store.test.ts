@@ -20,6 +20,15 @@ const TEACHER: AuthUserRecord = {
   createdAt: '2026-01-01T00:00:00.000Z',
 };
 
+const TEACHER_2: AuthUserRecord = {
+  id: 'teacher-2',
+  username: 'teacher_b',
+  role: 'teacher',
+  passwordHash: '',
+  passwordSalt: '',
+  createdAt: '2026-01-01T00:00:00.000Z',
+};
+
 const STUDENT: AuthUserRecord = {
   id: 'student-1',
   username: 'student_a',
@@ -617,5 +626,109 @@ describe('learning store', () => {
     expect(lessonAnalytics?.completionRate).toBeGreaterThan(0);
     expect(lessonAnalytics?.averageTimeSpentSec).toBeGreaterThan(0);
     expect(lessonAnalytics?.strugglingStudentCount).toBeGreaterThan(0);
+  });
+
+  it('migrates v2 store data to v3 view defaults', async () => {
+    await fs.writeFile(
+      storeFilePath,
+      JSON.stringify({
+        version: 2,
+        programs: [],
+        assignments: [],
+        applications: [],
+        generationTasks: [],
+      }),
+    );
+
+    const { getStudentLearningView } = await import('@/lib/server/learning-store');
+    const studentView = await getStudentLearningView(STUDENT);
+
+    expect(studentView.profile).toBeUndefined();
+    expect(studentView.recommendations.some((item) => item.type === 'complete_profile')).toBe(true);
+  });
+
+  it('upserts student profile and returns personalized recommendations', async () => {
+    const {
+      createLearningProgram,
+      getStudentLearningView,
+      publishLearningProgram,
+      upsertLearningStudentProfile,
+    } = await import('@/lib/server/learning-store');
+
+    await upsertLearningStudentProfile({
+      studentId: STUDENT.id,
+      studentUsername: STUDENT.username,
+      goals: ['两周内掌握电路分析'],
+      preferences: ['先看实验再练习'],
+      weaknesses: [{ title: '欧姆定律应用', severity: 'high', evidence: '学生自报' }],
+    });
+
+    const program = await createLearningProgram({
+      teacherId: TEACHER.id,
+      teacherUsername: TEACHER.username,
+      title: '电学补弱课',
+      description: '针对电路分析',
+      chapters: [{ title: '电路基础', lessons: [{ title: '欧姆定律应用' }] }],
+    });
+
+    await publishLearningProgram({
+      teacherId: TEACHER.id,
+      programId: program.id,
+      confirmPublish: true,
+    });
+
+    const studentView = await getStudentLearningView(STUDENT);
+
+    expect(studentView.profile?.goals[0].title).toBe('两周内掌握电路分析');
+    expect(studentView.profile?.weaknesses[0].severity).toBe('high');
+    expect(studentView.recommendations.some((item) => item.type === 'strengthen_weakness')).toBe(true);
+    expect(studentView.recommendations.some((item) => item.type === 'apply_program')).toBe(true);
+  });
+
+  it('returns only managed student profiles in teacher view', async () => {
+    const {
+      assignLearningProgramToStudents,
+      createLearningProgram,
+      getTeacherLearningView,
+      publishLearningProgram,
+      upsertLearningStudentProfile,
+    } = await import('@/lib/server/learning-store');
+
+    await upsertLearningStudentProfile({
+      studentId: STUDENT.id,
+      studentUsername: STUDENT.username,
+      goals: ['跟上当前课程'],
+      preferences: ['多做练习'],
+    });
+    await upsertLearningStudentProfile({
+      studentId: STUDENT_2.id,
+      studentUsername: STUDENT_2.username,
+      goals: ['提前预习'],
+      preferences: ['项目任务'],
+    });
+
+    const program = await createLearningProgram({
+      teacherId: TEACHER.id,
+      teacherUsername: TEACHER.username,
+      title: '函数基础课',
+      description: '',
+      chapters: [{ title: '一次函数', lessons: [{ title: '图像入门' }] }],
+    });
+    await publishLearningProgram({
+      teacherId: TEACHER.id,
+      programId: program.id,
+      confirmPublish: true,
+    });
+    await assignLearningProgramToStudents({
+      teacherId: TEACHER.id,
+      programId: program.id,
+      studentIds: [STUDENT.id],
+    });
+
+    const teacherView = await getTeacherLearningView(TEACHER);
+    const otherTeacherView = await getTeacherLearningView(TEACHER_2);
+
+    expect(teacherView.studentProfiles.map((profile) => profile.studentId)).toEqual([STUDENT.id]);
+    expect(otherTeacherView.studentProfiles).toHaveLength(0);
   });
 });

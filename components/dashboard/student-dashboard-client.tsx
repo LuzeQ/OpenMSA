@@ -23,6 +23,11 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { LogoutButton } from '@/components/auth/logout-button';
+import {
+  CompetencyRadarChart,
+  type StudentCompetencyDimensionView,
+  type StudentCompetencyRadarView,
+} from '@/components/dashboard/competency-radar-chart';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -52,7 +57,13 @@ interface StudentLessonRef {
   lessonId: string;
 }
 
-type StudentTab = 'learn' | 'apply' | 'records';
+type StudentTab = 'learn' | 'apply' | 'growth' | 'records';
+
+interface StudentProfileDraft {
+  goalsText: string;
+  preferencesText: string;
+  weaknessesText: string;
+}
 
 function statusLabel(status: string): string {
   if (status === 'pending_acceptance') return '待接收';
@@ -100,6 +111,258 @@ function lessonNodeTone(status: LearningLessonProgressStatus) {
   return 'border-slate-200/80 bg-white/70 text-slate-700 dark:border-slate-700/70 dark:bg-slate-900/50 dark:text-slate-300';
 }
 
+function splitProfileText(value: string): string[] {
+  return value
+    .split(/[\n,，;；]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function formatProfileItems(items: Array<{ title: string }>, emptyText: string): string {
+  if (items.length === 0) return emptyText;
+  return items.map((item) => item.title).slice(0, 3).join('、');
+}
+
+const COMPETENCY_DIMENSION_ORDER: Array<Pick<StudentCompetencyDimensionView, 'id' | 'label'>> = [
+  { id: 'curiosity', label: '好奇心' },
+  { id: 'imagination', label: '想象力' },
+  { id: 'growth_mindset', label: '成长型思维' },
+  { id: 'excellence', label: '持续精进' },
+  { id: 'self_caring', label: '自我观照' },
+  { id: 'empathy', label: '赋能的同理' },
+];
+
+function clampCompetencyLevel(value: number): number {
+  return Math.max(1, Math.min(6, Math.round(value)));
+}
+
+function buildDimensionView(
+  base: Pick<StudentCompetencyDimensionView, 'id' | 'label'>,
+  input: Omit<StudentCompetencyDimensionView, 'id' | 'label'>,
+): StudentCompetencyDimensionView {
+  return {
+    id: base.id,
+    label: base.label,
+    ...input,
+  };
+}
+
+function buildEmptyCompetencyRadarView(): StudentCompetencyRadarView {
+  return {
+    status: 'empty',
+    updatedAt: '',
+    dimensions: COMPETENCY_DIMENSION_ORDER.map((dimension) =>
+      buildDimensionView(dimension, {
+        level: null,
+        status: 'empty',
+        trend: 'stable',
+        summary: '还没有足够的学习证据形成判断。',
+        evidenceCount: 0,
+        evidence: ['完成课程学习、课堂提问、卡点上报或学习反思后，这里会逐步形成证据链。'],
+        nextGrowthTask: '先完成一节课，并记录一个真实问题或学习反思。',
+      }),
+    ),
+  };
+}
+
+function buildCompetencyRadarView(data: StudentLearningView): StudentCompetencyRadarView {
+  const profile = data.profile;
+  const hasProfileEvidence =
+    Boolean(profile) &&
+    ((profile?.goals.length || 0) > 0 ||
+      (profile?.preferences.length || 0) > 0 ||
+      (profile?.weaknesses.length || 0) > 0);
+  const hasLearningEvidence = data.assignments.length > 0;
+
+  if (!hasProfileEvidence && !hasLearningEvidence) {
+    return buildEmptyCompetencyRadarView();
+  }
+
+  const behavior = data.assignments.reduce(
+    (sum, item) => ({
+      totalLessons: sum.totalLessons + item.totalLessons,
+      completedLessons: sum.completedLessons + item.completedLessons,
+      studySeconds: sum.studySeconds + item.behaviorSummary.studySeconds,
+      replaySeconds: sum.replaySeconds + item.behaviorSummary.replaySeconds,
+      replayCount: sum.replayCount + item.behaviorSummary.replayCount,
+      aiQuestionTotal: sum.aiQuestionTotal + item.behaviorSummary.aiQuestionTotal,
+      quizAttempts: sum.quizAttempts + item.behaviorSummary.quizAttempts,
+      quizCorrect: sum.quizCorrect + item.behaviorSummary.quizCorrect,
+      pendingStuckCount: sum.pendingStuckCount + item.pendingStuckCount,
+      riskSignalCount: sum.riskSignalCount + item.riskSignals.length,
+    }),
+    {
+      totalLessons: 0,
+      completedLessons: 0,
+      studySeconds: 0,
+      replaySeconds: 0,
+      replayCount: 0,
+      aiQuestionTotal: 0,
+      quizAttempts: 0,
+      quizCorrect: 0,
+      pendingStuckCount: 0,
+      riskSignalCount: 0,
+    },
+  );
+  const progressRatio = behavior.totalLessons > 0 ? behavior.completedLessons / behavior.totalLessons : 0;
+  const quizAccuracy = behavior.quizAttempts > 0 ? behavior.quizCorrect / behavior.quizAttempts : null;
+  const profileStatus: StudentCompetencyDimensionView['status'] = hasLearningEvidence
+    ? 'observed'
+    : 'estimated';
+  const evidenceBase = hasLearningEvidence ? 2 : 1;
+  const updatedAt =
+    profile?.updatedAt ||
+    data.assignments
+      .map((item) => item.assignment.assignedAt)
+      .sort()
+      .at(-1) ||
+    '';
+
+  const dimensions = COMPETENCY_DIMENSION_ORDER.map((dimension) => {
+    if (dimension.id === 'curiosity') {
+      const level = clampCompetencyLevel(2 + Math.min(2, behavior.aiQuestionTotal) + (hasProfileEvidence ? 1 : 0));
+      return buildDimensionView(dimension, {
+        level,
+        status: profileStatus,
+        trend: behavior.aiQuestionTotal > 0 ? 'up' : 'stable',
+        summary: hasLearningEvidence
+          ? '基于课堂提问、课程参与和目标记录形成的初步观察。'
+          : '目前主要来自学习目标自述，仍需要课堂提问和探究证据验证。',
+        evidenceCount: evidenceBase + behavior.aiQuestionTotal,
+        evidence: [
+          behavior.aiQuestionTotal > 0
+            ? `已记录 ${behavior.aiQuestionTotal} 次 AI 提问。`
+            : '暂未记录课堂提问行为。',
+          profile?.goals.length ? `学习目标：${profile.goals[0].title}` : '尚未形成明确学习目标。',
+        ],
+        nextGrowthTask: '下一节课至少提出一个“为什么”或“如果换一种条件会怎样”的问题。',
+      });
+    }
+
+    if (dimension.id === 'imagination') {
+      const level = clampCompetencyLevel(2 + (profile?.preferences.length ? 1 : 0) + (behavior.aiQuestionTotal >= 2 ? 1 : 0));
+      return buildDimensionView(dimension, {
+        level,
+        status: profileStatus,
+        trend: behavior.aiQuestionTotal >= 2 ? 'up' : 'stable',
+        summary: '第一版主要观察学习方式偏好和问题表达，后续需要作品、方案改写等更强证据。',
+        evidenceCount: evidenceBase + (profile?.preferences.length || 0),
+        evidence: [
+          profile?.preferences.length ? `偏好方式：${profile.preferences[0].title}` : '尚未记录学习方式偏好。',
+          '暂未接入作品创作或方案迭代证据。',
+        ],
+        nextGrowthTask: '把一个知识点换成图示、故事、实验或生活场景重新表达一次。',
+      });
+    }
+
+    if (dimension.id === 'growth_mindset') {
+      const level = clampCompetencyLevel(
+        2 +
+          (profile?.weaknesses.length ? 1 : 0) +
+          (behavior.pendingStuckCount > 0 ? 1 : 0) +
+          (progressRatio > 0.3 ? 1 : 0),
+      );
+      return buildDimensionView(dimension, {
+        level,
+        status: profileStatus,
+        trend: behavior.pendingStuckCount > 0 || profile?.weaknesses.length ? 'up' : 'stable',
+        summary: '基于是否能识别薄弱点、暴露卡点并继续推进学习形成初步判断。',
+        evidenceCount: evidenceBase + (profile?.weaknesses.length || 0) + behavior.pendingStuckCount,
+        evidence: [
+          profile?.weaknesses.length ? `自报薄弱点：${profile.weaknesses[0].title}` : '尚未记录自报薄弱点。',
+          behavior.pendingStuckCount > 0
+            ? `当前有 ${behavior.pendingStuckCount} 个待处理卡点。`
+            : '暂未上报学习卡点。',
+        ],
+        nextGrowthTask: '遇到不会的内容时，写下“我卡在哪里、我试过什么、下一步要试什么”。',
+      });
+    }
+
+    if (dimension.id === 'excellence') {
+      const level = clampCompetencyLevel(
+        2 +
+          (progressRatio > 0.25 ? 1 : 0) +
+          (progressRatio > 0.75 ? 1 : 0) +
+          (quizAccuracy !== null && quizAccuracy >= 0.8 ? 1 : 0),
+      );
+      return buildDimensionView(dimension, {
+        level,
+        status: profileStatus,
+        trend: progressRatio > 0.5 ? 'up' : 'stable',
+        summary: '基于课程完成度、小测表现和持续学习时间形成初步观察。',
+        evidenceCount: evidenceBase + behavior.completedLessons + behavior.quizAttempts,
+        evidence: [
+          behavior.totalLessons > 0
+            ? `已完成 ${behavior.completedLessons}/${behavior.totalLessons} 个课时。`
+            : '尚未开始课程学习。',
+          quizAccuracy !== null ? `小测正确率约 ${Math.round(quizAccuracy * 100)}%。` : '暂未记录小测结果。',
+        ],
+        nextGrowthTask: '选一个已完成课时，用“我如何知道自己真的掌握了”复盘一次。',
+      });
+    }
+
+    if (dimension.id === 'self_caring') {
+      const hasHeavyReplay = behavior.replayCount >= 2 || behavior.replaySeconds >= 600;
+      const level = clampCompetencyLevel(2 + (hasHeavyReplay ? 1 : 0) + (behavior.riskSignalCount === 0 && hasLearningEvidence ? 1 : 0));
+      return buildDimensionView(dimension, {
+        level,
+        status: profileStatus,
+        trend: behavior.riskSignalCount > 0 ? 'watch' : 'stable',
+        summary: '基于复看、停顿和风险信号做非常初步的学习节奏观察。',
+        evidenceCount: evidenceBase + behavior.replayCount + behavior.riskSignalCount,
+        evidence: [
+          behavior.replayCount > 0 ? `记录到 ${behavior.replayCount} 次复看。` : '暂未记录复看行为。',
+          behavior.riskSignalCount > 0
+            ? `存在 ${behavior.riskSignalCount} 条学习风险信号。`
+            : '暂未出现明确学习风险信号。',
+        ],
+        nextGrowthTask: '学习 20 分钟后停下来标记一次状态：清楚、模糊、疲惫或需要求助。',
+      });
+    }
+
+    const level = clampCompetencyLevel(2 + (data.applications.length > 0 ? 1 : 0));
+    return buildDimensionView(dimension, {
+      level,
+      status: hasLearningEvidence ? 'observed' : 'estimated',
+      trend: 'stable',
+      summary: '当前系统还缺少同伴协作证据，只能基于申请表达和学习互动做弱判断。',
+      evidenceCount: evidenceBase + data.applications.length,
+      evidence: [
+        data.applications.length > 0
+          ? `已有 ${data.applications.length} 条课程申请记录。`
+          : '暂未记录同伴协作或求助回应证据。',
+        '后续需要接入课堂讨论、互评或教师观察。',
+      ],
+      nextGrowthTask: '下一次讨论中，先复述一次他人的观点，再补充自己的想法。',
+    });
+  });
+
+  return {
+    status: hasLearningEvidence ? 'evidence_based' : 'initial',
+    updatedAt,
+    dimensions,
+  };
+}
+
+function growthStatusLabel(status: StudentCompetencyRadarView['status']): string {
+  if (status === 'evidence_based') return '初步证据画像';
+  if (status === 'initial') return '初始画像 / 待验证';
+  return '待积累证据';
+}
+
+function dimensionStatusLabel(status: StudentCompetencyDimensionView['status']): string {
+  if (status === 'observed') return '有学习证据';
+  if (status === 'estimated') return '待验证';
+  return '待观察';
+}
+
+function dimensionTrendLabel(trend: StudentCompetencyDimensionView['trend']): string {
+  if (trend === 'up') return '上升';
+  if (trend === 'watch') return '需关注';
+  return '稳定';
+}
+
 function ProgressRing({ value, label }: { value: number; label?: string }) {
   const safeValue = Math.max(0, Math.min(100, Math.round(value)));
   return (
@@ -125,7 +388,14 @@ export function StudentDashboardClient({ username }: StudentDashboardClientProps
   const [quizInputByLessonKey, setQuizInputByLessonKey] = useState<
     Record<string, { attempts: string; correct: string }>
   >({});
+  const [profileDraft, setProfileDraft] = useState<StudentProfileDraft>({
+    goalsText: '',
+    preferencesText: '',
+    weaknessesText: '',
+  });
+  const [profileSaving, setProfileSaving] = useState(false);
   const [activeTab, setActiveTab] = useState<StudentTab>('learn');
+  const [activeGrowthDimensionId, setActiveGrowthDimensionId] = useState<string | null>('curiosity');
   const [selectedLessonRef, setSelectedLessonRef] = useState<StudentLessonRef | null>(null);
   const [applyProgramId, setApplyProgramId] = useState<string | null>(null);
 
@@ -148,6 +418,15 @@ export function StudentDashboardClient({ username }: StudentDashboardClientProps
   useEffect(() => {
     void fetchData();
   }, []);
+
+  useEffect(() => {
+    if (!data?.profile) return;
+    setProfileDraft({
+      goalsText: data.profile.goals.map((item) => item.title).join('\n'),
+      preferencesText: data.profile.preferences.map((item) => item.title).join('\n'),
+      weaknessesText: data.profile.weaknesses.map((item) => item.title).join('\n'),
+    });
+  }, [data?.profile]);
 
   const pendingCount = useMemo(
     () => data?.assignments.filter((item) => item.assignment.status === 'pending_acceptance').length || 0,
@@ -214,6 +493,34 @@ export function StudentDashboardClient({ username }: StudentDashboardClientProps
     () => data?.availablePrograms.find((program) => program.id === applyProgramId) || null,
     [applyProgramId, data],
   );
+
+  const competencyRadarView = useMemo(
+    () => (data ? buildCompetencyRadarView(data) : null),
+    [data],
+  );
+
+  const activeGrowthDimension = useMemo(() => {
+    if (!competencyRadarView) return null;
+    return (
+      competencyRadarView.dimensions.find((dimension) => dimension.id === activeGrowthDimensionId) ||
+      competencyRadarView.dimensions[0] ||
+      null
+    );
+  }, [activeGrowthDimensionId, competencyRadarView]);
+
+  const strongestGrowthDimension = useMemo(() => {
+    if (!competencyRadarView) return null;
+    return competencyRadarView.dimensions
+      .filter((dimension) => dimension.level !== null)
+      .sort((a, b) => (b.level || 0) - (a.level || 0))[0] || null;
+  }, [competencyRadarView]);
+
+  const focusGrowthDimension = useMemo(() => {
+    if (!competencyRadarView) return null;
+    return competencyRadarView.dimensions
+      .filter((dimension) => dimension.level !== null)
+      .sort((a, b) => (a.level || 0) - (b.level || 0))[0] || null;
+  }, [competencyRadarView]);
 
   const callAction = async (body: Record<string, unknown>, successMessage?: string) => {
     const res = await fetch('/api/learning', {
@@ -370,6 +677,38 @@ export function StudentDashboardClient({ username }: StudentDashboardClientProps
     }
   };
 
+  const onSaveProfile = async () => {
+    const goals = splitProfileText(profileDraft.goalsText);
+    const preferences = splitProfileText(profileDraft.preferencesText);
+    const weaknesses = splitProfileText(profileDraft.weaknessesText).map((title) => ({
+      title,
+      severity: 'medium',
+      evidence: '学生自报',
+    }));
+
+    if (goals.length === 0 && preferences.length === 0 && weaknesses.length === 0) {
+      toast.error('请至少填写初始化问卷中的一项');
+      return;
+    }
+
+    setProfileSaving(true);
+    try {
+      await callAction(
+        {
+          action: 'upsert_student_profile',
+          goals,
+          preferences,
+          weaknesses,
+        },
+        '初始化问卷已提交',
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '保存画像失败');
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
   if (loading || !data) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
@@ -419,137 +758,258 @@ export function StudentDashboardClient({ username }: StudentDashboardClientProps
           transition={{ delay: 0.08 }}
           className="rounded-[2rem] border border-white/60 bg-white/80 p-5 shadow-2xl shadow-black/[0.04] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80 md:p-7"
         >
-          <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-            <div className="space-y-5">
-              <div className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 dark:bg-blue-950/40 dark:text-blue-200">
-                <Radio className="size-3.5" />
-                下一步学习
-              </div>
+          <div className="grid items-stretch gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(420px,0.82fr)]">
+            <div className="flex min-h-[420px] flex-col justify-between gap-6 rounded-[1.75rem] bg-slate-50/80 p-5 dark:bg-slate-950/35 md:p-6">
+              <div className="space-y-5">
+                <div className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 dark:bg-blue-950/40 dark:text-blue-200">
+                  <Radio className="size-3.5" />
+                  下一步学习
+                </div>
 
-              {nextLearningItem?.type === 'learn' && nextLearningItem.lesson ? (
-                <div>
-                  <h1 className="text-2xl font-semibold tracking-tight md:text-4xl">
-                    {nextLearningItem.lesson.title}
-                  </h1>
-                  <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-                    {nextLearningItem.assignmentItem.program.title} · {nextLearningItem.chapter?.title}
-                  </p>
-                  <div className="mt-5 flex flex-wrap gap-3">
-                    {nextLearningItem.lesson.classroomId ? (
-                      <Button asChild size="lg" className="rounded-full">
-                        <Link href={`/classroom/${nextLearningItem.lesson.classroomId}`}>
-                          <PlayCircle className="size-4" />
-                          继续学习
-                        </Link>
-                      </Button>
-                    ) : (
+                {nextLearningItem?.type === 'learn' && nextLearningItem.lesson ? (
+                  <div>
+                    <h1 className="max-w-3xl text-2xl font-semibold tracking-tight md:text-4xl">
+                      {nextLearningItem.lesson.title}
+                    </h1>
+                    <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+                      {nextLearningItem.assignmentItem.program.title} · {nextLearningItem.chapter?.title}
+                    </p>
+                    <div className="mt-6 flex flex-wrap gap-3">
+                      {nextLearningItem.lesson.classroomId ? (
+                        <Button asChild size="lg" className="rounded-full">
+                          <Link href={`/classroom/${nextLearningItem.lesson.classroomId}`}>
+                            <PlayCircle className="size-4" />
+                            继续学习
+                          </Link>
+                        </Button>
+                      ) : (
+                        <Button
+                          size="lg"
+                          className="rounded-full"
+                          onClick={() =>
+                            setSelectedLessonRef({
+                              assignmentId: nextLearningItem.assignmentItem.assignment.id,
+                              chapterId: nextLearningItem.chapter!.id,
+                              lessonId: nextLearningItem.lesson!.id,
+                            })
+                          }
+                        >
+                          <Target className="size-4" />
+                          查看课时
+                        </Button>
+                      )}
                       <Button
                         size="lg"
-                        className="rounded-full"
+                        variant="outline"
+                        className="rounded-full bg-white/70 dark:bg-slate-900/70"
                         onClick={() =>
-                          setSelectedLessonRef({
-                            assignmentId: nextLearningItem.assignmentItem.assignment.id,
-                            chapterId: nextLearningItem.chapter!.id,
-                            lessonId: nextLearningItem.lesson!.id,
-                          })
+                          onUpdateLessonStatus(
+                            nextLearningItem.assignmentItem.assignment.id,
+                            nextLearningItem.lesson!.id,
+                            'completed',
+                          )
                         }
                       >
-                        <Target className="size-4" />
-                        查看课时
+                        <CheckCircle2 className="size-4" />
+                        标记完成
                       </Button>
-                    )}
+                    </div>
+                  </div>
+                ) : nextLearningItem?.type === 'accept' ? (
+                  <div>
+                    <h1 className="text-2xl font-semibold tracking-tight md:text-4xl">
+                      有一门课程待接收
+                    </h1>
+                    <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+                      {nextLearningItem.assignmentItem.program.title}
+                    </p>
+                    <Button
+                      size="lg"
+                      className="mt-6 rounded-full"
+                      onClick={() => onAccept(nextLearningItem.assignmentItem.assignment.id)}
+                    >
+                      <CheckCircle2 className="size-4" />
+                      接受这门课程
+                    </Button>
+                  </div>
+                ) : nextLearningItem?.type === 'apply' ? (
+                  <div>
+                    <h1 className="text-2xl font-semibold tracking-tight md:text-4xl">
+                      可以申请新的课程
+                    </h1>
+                    <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+                      {nextLearningItem.program.title}
+                    </p>
+                    <Button
+                      size="lg"
+                      className="mt-6 rounded-full"
+                      onClick={() => setApplyProgramId(nextLearningItem.program.id)}
+                    >
+                      <Send className="size-4" />
+                      申请加入
+                    </Button>
+                  </div>
+                ) : (
+                  <div>
+                    <h1 className="text-2xl font-semibold tracking-tight md:text-4xl">
+                      现在没有待办学习任务
+                    </h1>
+                    <p className="mt-3 max-w-xl text-sm text-slate-500 dark:text-slate-400">
+                      有新课程或老师派发后会出现在这里。你也可以先查看成长画像，了解目前的学习证据状态。
+                    </p>
                     <Button
                       size="lg"
                       variant="outline"
-                      className="rounded-full bg-white/60 dark:bg-slate-900/60"
-                      onClick={() =>
-                        onUpdateLessonStatus(
-                          nextLearningItem.assignmentItem.assignment.id,
-                          nextLearningItem.lesson!.id,
-                          'completed',
-                        )
-                      }
+                      className="mt-6 rounded-full bg-white/70 dark:bg-slate-900/70"
+                      onClick={() => setActiveTab('growth')}
                     >
-                      <CheckCircle2 className="size-4" />
-                      标记完成
+                      <Target className="size-4" />
+                      查看成长画像
                     </Button>
                   </div>
+                )}
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-[auto_minmax(0,1fr)]">
+                <div className="flex items-center gap-4 rounded-3xl border border-slate-200/70 bg-white/70 p-4 dark:border-slate-800 dark:bg-slate-900/55">
+                  <ProgressRing
+                    value={
+                      data.assignments.length
+                        ? Math.round(
+                            data.assignments.reduce((sum, item) => sum + item.progressPercent, 0) /
+                              data.assignments.length,
+                          )
+                        : 0
+                    }
+                  />
+                  <div>
+                    <div className="text-sm font-medium">整体进度</div>
+                    <div className="mt-1 text-xs leading-relaxed text-slate-500">
+                      学习中课程的平均完成比例
+                    </div>
+                  </div>
                 </div>
-              ) : nextLearningItem?.type === 'accept' ? (
-                <div>
-                  <h1 className="text-2xl font-semibold tracking-tight md:text-4xl">
-                    有一门课程待接收
-                  </h1>
-                  <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-                    {nextLearningItem.assignmentItem.program.title}
-                  </p>
-                  <Button
-                    size="lg"
-                    className="mt-5 rounded-full"
-                    onClick={() => onAccept(nextLearningItem.assignmentItem.assignment.id)}
-                  >
-                    <CheckCircle2 className="size-4" />
-                    接受这门课程
-                  </Button>
+                <div className="grid grid-cols-3 gap-3">
+                  {[
+                    { label: '待接收', value: pendingCount },
+                    { label: '学习中', value: activeCount },
+                    { label: '已完成', value: completedCount },
+                  ].map((metric) => (
+                    <div key={metric.label} className="rounded-3xl border border-slate-200/70 bg-white/70 p-4 text-center shadow-sm dark:border-slate-800 dark:bg-slate-900/55">
+                      <div className="text-2xl font-semibold">{metric.value}</div>
+                      <div className="mt-1 text-xs text-slate-500">{metric.label}</div>
+                    </div>
+                  ))}
                 </div>
-              ) : nextLearningItem?.type === 'apply' ? (
+              </div>
+            </div>
+
+            <div className="flex min-h-[420px] flex-col rounded-[1.75rem] border border-slate-200/70 bg-white/75 p-5 shadow-sm dark:border-slate-800 dark:bg-slate-950/40 md:p-6">
+              <div className="mb-5 flex items-start justify-between gap-3">
                 <div>
-                  <h1 className="text-2xl font-semibold tracking-tight md:text-4xl">
-                    可以申请新的课程
-                  </h1>
-                  <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-                    {nextLearningItem.program.title}
-                  </p>
+                  <div className="text-lg font-semibold">
+                    {data.profile ? '学生画像' : '初始化问卷'}
+                  </div>
+                  <div className="mt-1 text-sm leading-relaxed text-slate-500">
+                    {data.profile
+                      ? '系统将根据学习行为和课堂证据持续更新。'
+                      : '新用户只需完成一次，作为系统分析起点。'}
+                  </div>
+                </div>
+                <Badge variant={data.profile ? 'secondary' : 'outline'}>
+                  {data.profile ? '动态更新' : '待初始化'}
+                </Badge>
+              </div>
+              {data.profile ? (
+                <div className="flex flex-1 flex-col justify-between gap-5">
+                  <div className="grid gap-3">
+                    {[
+                      {
+                        label: '目标线索',
+                        value: formatProfileItems(data.profile.goals, '等待系统从学习目标中提取'),
+                      },
+                      {
+                        label: '学习方式',
+                        value: formatProfileItems(data.profile.preferences, '等待系统从学习行为中识别'),
+                      },
+                      {
+                        label: '当前卡点',
+                        value: formatProfileItems(data.profile.weaknesses, '等待系统从卡点和练习中识别'),
+                      },
+                    ].map((item) => (
+                      <div
+                        key={item.label}
+                        className="rounded-2xl bg-slate-50/80 p-4 dark:bg-slate-900/60"
+                      >
+                        <div className="text-xs font-medium text-slate-500">{item.label}</div>
+                        <div className="mt-1 text-sm leading-relaxed text-slate-700 dark:text-slate-200">
+                          {item.value}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="rounded-2xl bg-blue-50/80 p-4 text-sm leading-relaxed text-blue-900 dark:bg-blue-950/25 dark:text-blue-100">
+                    画像不是学生长期手动维护的资料卡。后续会从课程进度、提问、卡点、练习结果和教师观察中自动沉淀。
+                  </div>
                   <Button
-                    size="lg"
-                    className="mt-5 rounded-full"
-                    onClick={() => setApplyProgramId(nextLearningItem.program.id)}
+                    type="button"
+                    variant="outline"
+                    className="bg-white/70 dark:bg-slate-900/70"
+                    onClick={() => setActiveTab('growth')}
                   >
-                    <Send className="size-4" />
-                    申请加入
+                    <Target className="size-4" />
+                    查看成长画像
                   </Button>
                 </div>
               ) : (
-                <div>
-                  <h1 className="text-2xl font-semibold tracking-tight md:text-4xl">
-                    现在没有待办学习任务
-                  </h1>
-                  <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-                    有新课程或老师派发后会出现在这里。
-                  </p>
+                <div className="grid flex-1 content-start gap-4">
+                  <div className="rounded-2xl bg-blue-50/80 p-4 text-sm leading-relaxed text-blue-900 dark:bg-blue-950/30 dark:text-blue-100">
+                    这不是长期自评入口。完成初始化后，画像会主要根据课程进度、提问、卡点、练习和教师观察动态更新。
+                  </div>
+                  <label className="grid gap-1.5">
+                    <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
+                      1. 你现在最想达成的学习目标是什么？
+                    </span>
+                    <Textarea
+                      value={profileDraft.goalsText}
+                      onChange={(event) =>
+                        setProfileDraft((prev) => ({ ...prev, goalsText: event.target.value }))
+                      }
+                      placeholder="例如：两周内掌握电学实验分析"
+                      rows={2}
+                    />
+                  </label>
+                  <label className="grid gap-1.5">
+                    <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
+                      2. 哪种学习方式最容易让你进入状态？
+                    </span>
+                    <Textarea
+                      value={profileDraft.preferencesText}
+                      onChange={(event) =>
+                        setProfileDraft((prev) => ({ ...prev, preferencesText: event.target.value }))
+                      }
+                      placeholder="例如：先看真实案例，再自己推导"
+                      rows={2}
+                    />
+                  </label>
+                  <label className="grid gap-1.5">
+                    <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
+                      3. 最近最容易卡住的地方是什么？
+                    </span>
+                    <Textarea
+                      value={profileDraft.weaknessesText}
+                      onChange={(event) =>
+                        setProfileDraft((prev) => ({ ...prev, weaknessesText: event.target.value }))
+                      }
+                      placeholder="例如：公式变形、电路图分析"
+                      rows={2}
+                    />
+                  </label>
+                  <Button className="mt-1" onClick={onSaveProfile} disabled={profileSaving}>
+                    {profileSaving ? '提交中...' : '完成初始化'}
+                  </Button>
                 </div>
               )}
-            </div>
-
-            <div className="grid gap-3">
-              <div className="flex items-center justify-between rounded-3xl border border-slate-200/70 bg-slate-50/80 p-5 dark:border-slate-800 dark:bg-slate-950/40">
-                <div>
-                  <div className="text-sm font-medium">整体进度</div>
-                  <div className="text-xs text-slate-500">学习中课程的完成比例</div>
-                </div>
-                <ProgressRing
-                  value={
-                    data.assignments.length
-                      ? Math.round(
-                          data.assignments.reduce((sum, item) => sum + item.progressPercent, 0) /
-                            data.assignments.length,
-                        )
-                      : 0
-                  }
-                />
-              </div>
-              <div className="grid grid-cols-3 gap-3">
-                {[
-                  { label: '待接收', value: pendingCount },
-                  { label: '学习中', value: activeCount },
-                  { label: '已完成', value: completedCount },
-                ].map((metric) => (
-                  <div key={metric.label} className="rounded-2xl border border-slate-200/70 bg-white/70 p-4 text-center shadow-sm dark:border-slate-800 dark:bg-slate-950/40">
-                    <div className="text-2xl font-semibold">{metric.value}</div>
-                    <div className="text-xs text-slate-500">{metric.label}</div>
-                  </div>
-                ))}
-              </div>
             </div>
           </div>
         </motion.section>
@@ -558,6 +1018,7 @@ export function StudentDashboardClient({ username }: StudentDashboardClientProps
           {[
             { id: 'learn' as StudentTab, label: '我的学习', icon: BookOpen },
             { id: 'apply' as StudentTab, label: '申请课程', icon: Sparkles },
+            { id: 'growth' as StudentTab, label: '成长画像', icon: Target },
             { id: 'records' as StudentTab, label: '学习记录', icon: BarChart3 },
           ].map((item) => {
             const Icon = item.icon;
@@ -707,6 +1168,158 @@ export function StudentDashboardClient({ username }: StudentDashboardClientProps
                 </button>
               ))
             )}
+          </section>
+        )}
+
+        {activeTab === 'growth' && competencyRadarView && (
+          <section className="space-y-4">
+            <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+              <div className="rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80">
+                <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 dark:bg-blue-950/40 dark:text-blue-200">
+                      <Target className="size-3.5" />
+                      {growthStatusLabel(competencyRadarView.status)}
+                    </div>
+                    <h2 className="mt-3 text-xl font-semibold">核心素养雷达</h2>
+                    <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                      基于初始化线索、课程行为、卡点和练习记录形成的初步成长画像。
+                    </p>
+                  </div>
+                  <Badge variant="outline">
+                    {competencyRadarView.updatedAt
+                      ? `更新 ${formatDateTime(competencyRadarView.updatedAt)}`
+                      : '尚未生成'}
+                  </Badge>
+                </div>
+                <CompetencyRadarChart
+                  view={competencyRadarView}
+                  onSelectDimension={setActiveGrowthDimensionId}
+                />
+              </div>
+
+              <div className="grid gap-4">
+                <div className="rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h2 className="font-semibold">当前解读</h2>
+                      <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                        这里不是正式测评分数，而是帮助你看见证据和下一步行动。
+                      </p>
+                    </div>
+                    <Badge variant={competencyRadarView.status === 'evidence_based' ? 'default' : 'secondary'}>
+                      {growthStatusLabel(competencyRadarView.status)}
+                    </Badge>
+                  </div>
+                  <div className="mt-4 grid gap-3">
+                    <div className="rounded-2xl bg-slate-50/80 p-4 dark:bg-slate-950/40">
+                      <div className="text-xs text-slate-500">相对优势</div>
+                      <div className="mt-1 text-sm font-medium">
+                        {strongestGrowthDimension
+                          ? `${strongestGrowthDimension.label} · L${strongestGrowthDimension.level}`
+                          : '待积累更多学习证据'}
+                      </div>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50/80 p-4 dark:bg-slate-950/40">
+                      <div className="text-xs text-slate-500">当前成长重点</div>
+                      <div className="mt-1 text-sm font-medium">
+                        {focusGrowthDimension
+                          ? `${focusGrowthDimension.label} · ${focusGrowthDimension.nextGrowthTask}`
+                          : '先完成一节课，并记录一个真实问题或反思。'}
+                      </div>
+                    </div>
+                    {activeGrowthDimension && (
+                      <div className="rounded-2xl border border-blue-200/70 bg-blue-50/70 p-4 text-blue-950 dark:border-blue-900/60 dark:bg-blue-950/20 dark:text-blue-100">
+                        <div className="text-xs opacity-70">当前选中维度</div>
+                        <div className="mt-1 font-medium">
+                          {activeGrowthDimension.label}
+                          {activeGrowthDimension.level ? ` · L${activeGrowthDimension.level}` : ' · 待观察'}
+                        </div>
+                        <p className="mt-2 text-sm opacity-80">{activeGrowthDimension.summary}</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80">
+                  <h2 className="font-semibold">反思提示</h2>
+                  <div className="mt-3 rounded-2xl bg-slate-50/80 p-4 text-sm text-slate-600 dark:bg-slate-950/40 dark:text-slate-300">
+                    {activeGrowthDimension
+                      ? activeGrowthDimension.nextGrowthTask
+                      : '选择一个维度，围绕最近一次学习写下证据、困难和下一步尝试。'}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {competencyRadarView.dimensions.map((dimension) => {
+                const isActive = activeGrowthDimension?.id === dimension.id;
+                return (
+                  <button
+                    key={dimension.id}
+                    type="button"
+                    onClick={() => setActiveGrowthDimensionId(dimension.id)}
+                    className={cn(
+                      'rounded-[1.5rem] border bg-white/80 p-4 text-left shadow-xl shadow-black/[0.03] backdrop-blur-xl transition hover:-translate-y-0.5 hover:shadow-2xl dark:bg-slate-900/80',
+                      isActive
+                        ? 'border-blue-300 ring-2 ring-blue-500/20 dark:border-blue-800'
+                        : 'border-white/60 dark:border-slate-800/70',
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h3 className="font-semibold">{dimension.label}</h3>
+                        <div className="mt-1 text-xs text-slate-500">
+                          {dimensionStatusLabel(dimension.status)} · {dimensionTrendLabel(dimension.trend)}
+                        </div>
+                      </div>
+                      <Badge variant={dimension.status === 'observed' ? 'default' : 'outline'}>
+                        {dimension.level ? `L${dimension.level}` : '待观察'}
+                      </Badge>
+                    </div>
+                    <p className="mt-3 line-clamp-2 text-sm text-slate-600 dark:text-slate-300">
+                      {dimension.summary}
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        证据 {dimension.evidenceCount}
+                      </span>
+                      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        {dimensionTrendLabel(dimension.trend)}
+                      </span>
+                    </div>
+                    <div className="mt-3 rounded-2xl bg-slate-50/80 p-3 text-xs text-slate-500 dark:bg-slate-950/40 dark:text-slate-400">
+                      {dimension.nextGrowthTask}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]">
+              <div className="rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80">
+                <h2 className="font-semibold">成长证据</h2>
+                <div className="mt-4 space-y-2">
+                  {(activeGrowthDimension?.evidence || []).map((evidence) => (
+                    <div key={evidence} className="rounded-2xl bg-slate-50/80 p-3 text-sm text-slate-600 dark:bg-slate-950/40 dark:text-slate-300">
+                      {evidence}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80">
+                <h2 className="font-semibold">评价边界</h2>
+                <div className="mt-4 grid gap-3 text-sm text-slate-600 dark:text-slate-300">
+                  <div className="rounded-2xl bg-slate-50/80 p-4 dark:bg-slate-950/40">
+                    第一版只把现有学习行为转成可视化初始画像，正式等级需要课堂作品、教师观察、学生反思和更完整的证据链共同支持。
+                  </div>
+                  <div className="rounded-2xl bg-slate-50/80 p-4 dark:bg-slate-950/40">
+                    初始化问卷只作为起点线索，不会单独决定核心素养等级；后续画像由学习行为和课堂证据持续更新。
+                  </div>
+                </div>
+              </div>
+            </div>
           </section>
         )}
 

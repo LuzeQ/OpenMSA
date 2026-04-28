@@ -21,6 +21,7 @@ import {
   submitLearningQuizResult,
   updateLearningLessonStatus,
   updateLearningProgramStructure,
+  upsertLearningStudentProfile,
 } from '@/lib/server/learning-store';
 import type { LearningLessonProgressStatus } from '@/lib/types/learning';
 import { mapLearningDomainError, ensureTeacherOrAdmin } from './utils';
@@ -67,6 +68,7 @@ type LearningAction =
   | 'report_stuck'
   | 'resolve_stuck'
   | 'resolve_risk'
+  | 'upsert_student_profile'
   | 'create_course'
   | 'publish_course'
   | 'assign_course'
@@ -115,6 +117,9 @@ interface ActionBody {
   note?: string;
   stuckId?: string;
   riskKey?: string;
+  goals?: unknown;
+  preferences?: unknown;
+  weaknesses?: unknown;
 }
 
 function normalizeChapters(chapters: ActionChapterInput[] | undefined) {
@@ -421,6 +426,22 @@ export async function POST(request: Request) {
         });
 
         return apiSuccess({ assignment });
+      }
+
+      case 'upsert_student_profile': {
+        if (user.role !== 'student') {
+          return apiError('INVALID_REQUEST', 403, 'Only students can update their own learning profile');
+        }
+
+        const profile = await upsertLearningStudentProfile({
+          studentId: user.id,
+          studentUsername: user.username,
+          goals: body.goals,
+          preferences: body.preferences,
+          weaknesses: body.weaknesses,
+        });
+
+        return apiSuccess({ profile });
       }
 
       // Backward compatibility for previous prototype actions.

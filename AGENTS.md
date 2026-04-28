@@ -1,41 +1,37 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Setup and common commands
 
 - Requirements: Node.js >= 20.9.0, pnpm >= 10.
 - `pnpm install` — install dependencies. Root `postinstall` also builds the workspace packages in `packages/mathml2omml` and `packages/pptxgenjs`.
-- `cp .env.example .env.local` — base env setup. Configure at least one LLM provider for generation paths.
-- Auth-enabled local runs need `AUTH_SECRET` for login/session creation, although `.env.example` currently only documents `ACCESS_CODE`. `TEACHER_INVITE_CODE` is optional for teacher self-registration; without it, self-registered users are students. Optional seed admin envs are `AUTH_SEED_ADMIN_USERNAME` and `AUTH_SEED_ADMIN_PASSWORD`.
-- Server-side provider config can come from `.env.local` and/or `server-providers.yml`. Provider secrets stay server-side; `/api/server-providers` only exposes metadata.
+- `cp .env.example .env.local` — base env setup.
+- Current branch note: the auth-enabled app also needs `AUTH_SECRET` for login/session creation. `TEACHER_INVITE_CODE` is optional for teacher self-registration. Optional seed admin envs exist: `AUTH_SEED_ADMIN_USERNAME` and `AUTH_SEED_ADMIN_PASSWORD`.
+- Server-side provider config can come from `.env.local` and/or `server-providers.yml`.
 
 ### Run the app
 
 - `pnpm dev` — start the Next.js dev server.
 - `pnpm build` — production build.
 - `pnpm start` — serve the production build.
-- Docker is supported from README via `docker compose up --build` after creating `.env.local`.
 
 ### Linting and formatting
 
 - `pnpm lint`
 - `pnpm check` — Prettier check.
 - `pnpm format` — Prettier write.
-- `pnpm check:i18n-keys` — validate translation keys.
 - `pnpm exec eslint app/page.tsx`
 - `pnpm exec prettier app/page.tsx --check`
 
-### Tests and evals
+### Tests
 
-- `pnpm test` — run Vitest. Vitest includes `tests/**/*.test.ts` and uses `tests/setup-env.ts`.
+- `pnpm test` — run Vitest.
 - `pnpm exec vitest run tests/server/middleware-auth.test.ts`
 - `pnpm exec vitest run tests/server/learning-store.test.ts -t "creates"`
 - `pnpm test:e2e` — run Playwright.
 - `pnpm exec playwright test e2e/tests/auth-and-prototype-flow.spec.ts`
 - `pnpm test:e2e:ui`
-- `pnpm eval:whiteboard`
-- `pnpm eval:outline-language`
 
 ### E2E test runner details
 
@@ -47,10 +43,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### App model
 
-- This is a Next.js 16 App Router app using React 19 and TypeScript.
+- This is a Next.js 16 App Router app.
 - `app/layout.tsx` installs theme/i18n providers and mounts `components/server-providers-init.tsx`, which syncs server-configured providers into the client settings store.
 - `middleware.ts` enforces session auth for almost everything. `/login`, `/register`, `/api/auth/*`, and `/api/health` are public. `/`, `/generation-preview`, and `/teacher` are teacher/admin-only surfaces; students are redirected to `/student`.
-- `ACCESS_CODE` is a separate site-level access gate from the auth/session system.
 
 ### Two classroom-generation paths
 
@@ -59,7 +54,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is the main browser flow used by the home page.
 
 - `app/page.tsx` collects the requirement, optional PDF, language, web-search toggle, and current provider/settings state.
-- `app/generation-preview/page.tsx` performs the upfront generation pipeline in the browser session: parses the PDF if present, optionally runs web search, optionally generates agent profiles in auto-agent mode, streams outlines from `/api/generate/scene-outlines-stream`, generates the first scene content/actions/TTS, seeds `useStageStore`, stores continuation params in `sessionStorage`, and navigates to `/classroom/[id]`.
+- `app/generation-preview/page.tsx` performs the upfront generation pipeline in the browser session:
+  - parses the PDF if present,
+  - optionally runs web search,
+  - optionally generates agent profiles in auto-agent mode,
+  - streams outlines from `/api/generate/scene-outlines-stream`,
+  - generates the first scene content/actions/TTS,
+  - seeds `useStageStore`, stores continuation params in `sessionStorage`, and navigates to `/classroom/[id]`.
 - `app/classroom/[id]/page.tsx` then loads the stage and resumes background generation for the remaining scenes/media via `useSceneGenerator`.
 
 Important consequence: the preview page only guarantees the first scene before navigation. Remaining scene generation continues from the classroom page.
@@ -68,9 +69,8 @@ Important consequence: the preview page only guarantees the first scene before n
 
 This is the hosted / API-oriented flow.
 
-- `POST /api/generate-classroom` creates a JSON job in `data/classroom-jobs` and schedules `runClassroomGenerationJob()` with Next's `after()`.
-- `lib/server/classroom-generation.ts` runs the full pipeline server-side: model resolution, optional Tavily web search, outline generation, richness-policy adjustments, concurrent scene generation, optional media/TTS generation, and final persistence.
-- Jobs persist progress and checkpoints through `lib/server/classroom-job-store.ts`; failed/stale jobs can be resumed through the generation job APIs when a checkpoint exists.
+- `POST /api/generate-classroom` creates a JSON job in `data/classroom-jobs` and schedules `runClassroomGenerationJob()`.
+- `lib/server/classroom-generation.ts` runs the full pipeline server-side: model resolution, optional web search, outline generation, scene generation, optional media/TTS generation, and final persistence.
 - Results are stored in `data/classrooms` and polled through `GET /api/generate-classroom/[jobId]`.
 - This flow is the better mental model for hosted usage and the `skills/openmaic` integration.
 
@@ -79,8 +79,9 @@ This is the hosted / API-oriented flow.
 - `components/stage.tsx` is the main classroom shell. It coordinates the scene sidebar, canvas/stage area, roundtable UI, playback engine, and chat area.
 - `lib/store/stage.ts` is the central runtime store for the current stage/scenes/chats/generation status.
 - `lib/store/settings.ts` is the persisted global settings store for model/provider/audio/agent/layout preferences.
-- Scene rendering is split by type: slide editing/rendering lives under `components/slide-renderer/*`; quiz, interactive, and PBL scene-specific renderers live under `components/scene-renderers/*`.
-- `lib/api/stage-api*.ts` is the imperative facade used by generation and action code to mutate stages, scenes, canvas elements, navigation state, and whiteboards.
+- Scene rendering is split by type:
+  - slide editing/rendering: `components/slide-renderer/*`
+  - scene-specific renderers: `components/scene-renderers/*` (quiz, interactive, PBL)
 
 ### Shared action model for lecture playback and live chat
 
@@ -98,26 +99,29 @@ This is the hosted / API-oriented flow.
 ### Providers and model resolution
 
 - Client-side model/provider selection lives in `lib/store/settings.ts`.
-- Server-side provider resolution lives in `lib/server/provider-config.ts` and `lib/server/resolve-model.ts`.
-- Server config is built from `server-providers.yml` plus environment variables. Env vars override YAML fields; Ollama can be activated with a base URL alone. The server LLM provider ID `anthropic` is currently filtered out in `provider-config.ts`.
+- Server-side provider resolution lives in `lib/server/provider-config.ts`.
+- Server config is built from `server-providers.yml` plus environment variables.
 - `/api/server-providers` exposes only provider metadata/base URLs/models; secrets stay server-side.
 - `components/server-providers-init.tsx` fetches that metadata and merges it into the client store on most pages.
-- `ALLOW_LOCAL_NETWORKS=true` is required for client-supplied private/local URLs in self-hosted scenarios; server-configured Ollama bypasses that client-side SSRF restriction.
 
 ### Persistence layers
 
 #### Browser-side persistence
 
-- Dexie/IndexedDB schema is in `lib/utils/database.ts` with database name `MAIC-Database`.
+- Dexie/IndexedDB schema is in `lib/utils/database.ts`.
 - `lib/utils/stage-storage.ts` persists stages, scenes, current scene selection, chats, and thumbnails.
-- IndexedDB is also used for audio blobs, generated media, persisted outlines for resume-on-refresh, playback state, and generated agent profiles.
+- IndexedDB is also used for:
+  - audio blobs,
+  - generated media,
+  - persisted outlines for resume-on-refresh,
+  - generated agent profiles.
 
 #### Server-side persistence
 
 Server data is JSON-file-backed under `data/`:
 
 - `data/classrooms` — persisted generated classrooms.
-- `data/classroom-jobs` — async classroom generation jobs and checkpoints.
+- `data/classroom-jobs` — async classroom generation jobs.
 - `data/auth/users.json` — auth users.
 - `data/learning/store.json` — teacher/student learning data.
 
@@ -125,10 +129,12 @@ Server data is JSON-file-backed under `data/`:
 
 ### Auth and role-specific surfaces
 
-- Session token creation/verification lives in `lib/server/auth/session.ts`; middleware performs its own Edge-compatible HMAC verification.
-- User storage lives in `lib/server/auth/storage.ts` and can seed an admin user from env.
+- Session token creation/verification lives in `lib/server/auth/session.ts`.
+- User storage lives in `lib/server/auth/storage.ts`.
 - Auth API routes are under `app/api/auth/*`.
-- Teacher and student dashboards are separate route surfaces: `app/teacher/page.tsx` and `app/student/page.tsx`.
+- Teacher and student dashboards are separate route surfaces:
+  - `app/teacher/page.tsx`
+  - `app/student/page.tsx`
 - The learning dashboard backend is `app/api/learning/route.ts`, backed by `lib/server/learning-store.ts`.
 
 ### Learning / dashboard subsystem
@@ -137,23 +143,14 @@ The current branch adds a second major product surface alongside the classroom g
 
 - Teachers create/publish/assign structured programs from the teacher dashboard.
 - Students accept assignments, launch linked classrooms, mark lessons in progress/completed, and report stuck points.
-- Lesson generation tasks and syllabus/course-agent APIs live under `app/api/learning/*` and share the auth/session infrastructure.
-- This subsystem is separate from the main classroom runtime but can reference classroom IDs as lesson content.
+- This subsystem is separate from the main classroom runtime but shares auth/session infrastructure and can reference classroom IDs as lesson content.
 
 ### Important invariants that are easy to miss
 
-- Media placeholder IDs such as `gen_img_1` / `gen_vid_1` are not globally unique; they are only unique within a stage. The codebase works around this by keying persisted media as `${stageId}:${elementId}` and clearing media/whiteboard state on classroom switches.
+- Media placeholder IDs such as `gen_img_1` / `gen_vid_1` are not globally unique; they are only unique within a stage. The codebase works around this by keying persisted media by `stageId` and clearing media/whiteboard state on classroom switches.
 - Generated agents can be persisted both in IndexedDB and embedded into server-generated stage payloads; when debugging agent selection, check both the stage data and the agent registry hydration path.
-- Server classroom generation intentionally has fallback paths for outlines, slides, and interactive scenes so a completed job may include degraded fallback content rather than failing entirely.
-- `CLASSROOM_SCENE_CONCURRENCY` is bounded to 1–6 and defaults to 2; `CLASSROOM_MAX_OUTPUT_TOKENS` is bounded to 512–8192 and defaults to 4096.
-- `next.config.ts` uses standalone output outside Vercel and transpiles the local workspace packages. It also sets `frame-ancestors` from `ALLOWED_FRAME_ANCESTORS` and omits `X-Frame-Options` when custom frame ancestors are configured.
 
 ### Workspace packages and external integration
 
 - `packages/mathml2omml` and `packages/pptxgenjs` are local workspace packages; they are built during install and transpiled by Next (`next.config.ts`).
 - `skills/openmaic` contains the OpenClaw/ClawHub integration. That integration aligns more closely with the server-side async generation APIs than with the browser-only generation preview flow.
-
-## Other repository guidance checked
-
-- No `.cursor/rules/`, `.cursorrules`, or `.github/copilot-instructions.md` files were present when this file was updated.
-- `AGENTS.md` mirrors the Claude guidance for Codex; keep it in sync if future changes should apply to both assistants.

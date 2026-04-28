@@ -24,9 +24,12 @@ import type {
   LearningProgramStatus,
   LearningProgramApplication,
   LearningPublishWarning,
+  LearningRecommendation,
   LearningRiskSignal,
+  LearningStudentProfile,
   LearningSyllabusAnalytics,
   LearningStoreData,
+  LearningWeaknessSeverity,
   StudentCourseView,
   StudentLearningView,
   TeacherAssignmentSummary,
@@ -519,13 +522,93 @@ function sanitizeGenerationTask(value: unknown): LearningLessonGenerationTask | 
   };
 }
 
+function normalizeWeaknessSeverity(value: unknown): LearningWeaknessSeverity {
+  if (value === 'high' || value === 'medium') return value;
+  return 'low';
+}
+
+function sanitizeProfileItems<T extends { id: string; title: string; createdAt: string; updatedAt: string }>(
+  value: unknown,
+  timestamp: string,
+  mapItem: (raw: Record<string, unknown>, title: string) => T,
+): T[] {
+  if (!Array.isArray(value)) return [];
+
+  const seen = new Set<string>();
+  return value
+    .map((raw) => {
+      if (typeof raw === 'string') {
+        const title = raw.trim();
+        if (!title) return null;
+        return mapItem(
+          {
+            id: crypto.randomUUID(),
+            title,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          },
+          title,
+        );
+      }
+      if (!raw || typeof raw !== 'object') return null;
+      const item = raw as Record<string, unknown>;
+      const title = asString(item.title).trim();
+      if (!title) return null;
+      return mapItem(item, title);
+    })
+    .filter((item): item is T => {
+      if (!item) return false;
+      const key = item.title.trim().toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 12);
+}
+
+function sanitizeStudentProfile(value: unknown, timestamp: string): LearningStudentProfile | null {
+  if (!value || typeof value !== 'object') return null;
+  const profile = value as Partial<LearningStudentProfile>;
+  const studentId = asOptionalString(profile.studentId);
+  const studentUsername = asOptionalString(profile.studentUsername);
+  if (!studentId || !studentUsername) return null;
+
+  return {
+    studentId,
+    studentUsername,
+    goals: sanitizeProfileItems(profile.goals, timestamp, (item, title) => ({
+      id: asOptionalString(item.id) || crypto.randomUUID(),
+      title,
+      createdAt: asOptionalString(item.createdAt) || timestamp,
+      updatedAt: asOptionalString(item.updatedAt) || timestamp,
+    })),
+    preferences: sanitizeProfileItems(profile.preferences, timestamp, (item, title) => ({
+      id: asOptionalString(item.id) || crypto.randomUUID(),
+      title,
+      createdAt: asOptionalString(item.createdAt) || timestamp,
+      updatedAt: asOptionalString(item.updatedAt) || timestamp,
+    })),
+    weaknesses: sanitizeProfileItems(profile.weaknesses, timestamp, (item, title) => ({
+      id: asOptionalString(item.id) || crypto.randomUUID(),
+      title,
+      severity: normalizeWeaknessSeverity(item.severity),
+      evidence: asOptionalString(item.evidence),
+      createdAt: asOptionalString(item.createdAt) || timestamp,
+      updatedAt: asOptionalString(item.updatedAt) || timestamp,
+    })),
+    createdAt: asOptionalString(profile.createdAt) || timestamp,
+    updatedAt: asOptionalString(profile.updatedAt) || timestamp,
+  };
+}
+
 function createEmptyStore(): LearningStoreData {
   return {
-    version: 2,
+    version: 3,
     programs: [],
     assignments: [],
     applications: [],
     generationTasks: [],
+    studentProfiles: [],
   };
 }
 
@@ -712,11 +795,12 @@ function migrateFromV1(raw: Record<string, unknown>): LearningStoreData {
     : [];
 
   return {
-    version: 2,
+    version: 3,
     programs,
     assignments,
     applications: [],
     generationTasks: [],
+    studentProfiles: [],
   };
 }
 
@@ -726,7 +810,7 @@ function normalizeStore(raw: unknown): LearningStoreData {
   }
 
   const value = raw as Record<string, unknown>;
-  if (value.version === 2) {
+  if (value.version === 2 || value.version === 3) {
     const timestamp = nowIso();
     const programs = Array.isArray(value.programs)
       ? value.programs
@@ -752,12 +836,19 @@ function normalizeStore(raw: unknown): LearningStoreData {
           .filter((task): task is LearningLessonGenerationTask => task !== null)
       : [];
 
+    const studentProfiles = Array.isArray(value.studentProfiles)
+      ? value.studentProfiles
+          .map((profile) => sanitizeStudentProfile(profile, timestamp))
+          .filter((profile): profile is LearningStudentProfile => profile !== null)
+      : [];
+
     return {
-      version: 2,
+      version: 3,
       programs,
       assignments,
       applications,
       generationTasks,
+      studentProfiles,
     };
   }
 
@@ -783,6 +874,43 @@ async function readStore(): Promise<LearningStoreData> {
 
 async function writeStore(store: LearningStoreData): Promise<void> {
   await writeJsonFileAtomic(getLearningFilePath(), store);
+}
+
+function findStudentProfile(store: LearningStoreData, studentId: string): LearningStudentProfile | undefined {
+  return store.studentProfiles.find((profile) => profile.studentId === studentId);
+}
+
+function createProfileFromInput(input: {
+  studentId: string;
+  studentUsername: string;
+  goals?: unknown;
+  preferences?: unknown;
+  weaknesses?: unknown;
+  existing?: LearningStudentProfile;
+  timestamp: string;
+}): LearningStudentProfile {
+  const base = input.existing || {
+    studentId: input.studentId,
+    studentUsername: input.studentUsername,
+    goals: [],
+    preferences: [],
+    weaknesses: [],
+    createdAt: input.timestamp,
+    updatedAt: input.timestamp,
+  };
+
+  return sanitizeStudentProfile(
+    {
+      ...base,
+      studentId: input.studentId,
+      studentUsername: input.studentUsername,
+      goals: input.goals === undefined ? base.goals : input.goals,
+      preferences: input.preferences === undefined ? base.preferences : input.preferences,
+      weaknesses: input.weaknesses === undefined ? base.weaknesses : input.weaknesses,
+      updatedAt: input.timestamp,
+    },
+    input.timestamp,
+  )!;
 }
 
 function getProgramLessons(program: LearningCourseProgram): LearningLesson[] {
@@ -1358,6 +1486,41 @@ export async function createLearningProgram(
   store.programs.unshift(program);
   await writeStore(store);
   return program;
+}
+
+export interface UpsertLearningStudentProfileInput {
+  studentId: string;
+  studentUsername: string;
+  goals?: unknown;
+  preferences?: unknown;
+  weaknesses?: unknown;
+}
+
+export async function upsertLearningStudentProfile(
+  input: UpsertLearningStudentProfileInput,
+): Promise<LearningStudentProfile> {
+  const timestamp = nowIso();
+  const store = await readStore();
+  const existingIndex = store.studentProfiles.findIndex((profile) => profile.studentId === input.studentId);
+  const existing = existingIndex >= 0 ? store.studentProfiles[existingIndex] : undefined;
+  const profile = createProfileFromInput({
+    studentId: input.studentId,
+    studentUsername: input.studentUsername,
+    goals: input.goals,
+    preferences: input.preferences,
+    weaknesses: input.weaknesses,
+    existing,
+    timestamp,
+  });
+
+  if (existingIndex >= 0) {
+    store.studentProfiles[existingIndex] = profile;
+  } else {
+    store.studentProfiles.unshift(profile);
+  }
+
+  await writeStore(store);
+  return profile;
 }
 
 export interface CreateLearningCourseInput {
@@ -2371,6 +2534,14 @@ export async function getTeacherLearningView(
   const managedApplications = store.applications.filter((application) =>
     managedProgramIds.has(application.programId),
   );
+  const managedStudentIds = new Set([
+    ...managedAssignments.map((assignment) => assignment.studentId),
+    ...managedApplications.map((application) => application.studentId),
+  ]);
+  const studentProfiles =
+    user.role === 'admin'
+      ? store.studentProfiles
+      : store.studentProfiles.filter((profile) => managedStudentIds.has(profile.studentId));
 
   const summariesBase = managedAssignments
     .map((assignment) => {
@@ -2428,6 +2599,7 @@ export async function getTeacherLearningView(
     interventionInbox,
     students,
     applications: managedApplications.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    studentProfiles,
   };
 }
 
@@ -2449,6 +2621,94 @@ function buildStudentCourseView(
     riskSignals: buildRiskSignals(assignment, program, summary.chapterSummaries, cohortStats),
     pendingStuckCount: assignment.stuckPoints.filter((stuck) => stuck.status === 'open').length,
   };
+}
+
+function buildLearningRecommendations(
+  profile: LearningStudentProfile | undefined,
+  assignments: StudentCourseView[],
+  availablePrograms: LearningCourseProgram[],
+): LearningRecommendation[] {
+  const recommendations: LearningRecommendation[] = [];
+
+  if (!profile || profile.goals.length === 0 || profile.preferences.length === 0) {
+    recommendations.push({
+      id: 'complete-profile',
+      type: 'complete_profile',
+      priority: 'high',
+      title: '完善学习画像',
+      description: '补充学习目标、偏好和薄弱点后，系统能给出更稳定的下一步推荐。',
+      reason: '当前画像信息不足',
+      actionLabel: '更新画像',
+    });
+  }
+
+  if (profile) {
+    for (const weakness of profile.weaknesses.slice(0, 3)) {
+      recommendations.push({
+        id: `weakness:${weakness.id}`,
+        type: 'strengthen_weakness',
+        priority: weakness.severity === 'high' ? 'high' : 'medium',
+        title: `补强：${weakness.title}`,
+        description: '优先选择相关课时、练习或向老师说明这个薄弱点。',
+        reason: weakness.evidence || '来自学生自报薄弱点',
+        actionLabel: '安排补弱',
+      });
+    }
+  }
+
+  for (const assignment of assignments) {
+    const risk = assignment.riskSignals.find((item) => item.level === 'high' || item.level === 'medium');
+    if (!risk) continue;
+    recommendations.push({
+      id: `risk:${assignment.assignment.id}:${risk.key}`,
+      type: 'review_risk',
+      priority: risk.level === 'high' ? 'high' : 'medium',
+      title: risk.lessonTitle ? `复习：${risk.lessonTitle}` : `关注：${risk.chapterTitle || assignment.program.title}`,
+      description: risk.message,
+      reason: '来自学习行为、测验或卡点风险信号',
+      actionLabel: '查看课程',
+      assignmentId: assignment.assignment.id,
+      chapterId: risk.chapterId,
+      lessonId: risk.lessonId,
+    });
+  }
+
+  if (assignments.length === 0 && availablePrograms[0]) {
+    recommendations.push({
+      id: `apply:${availablePrograms[0].id}`,
+      type: 'apply_program',
+      priority: 'medium',
+      title: `申请课程：${availablePrograms[0].title}`,
+      description: availablePrograms[0].description || '当前还没有学习任务，可以先申请一门可用课程。',
+      reason: '当前没有已派发或已接收的课程',
+      actionLabel: '申请课程',
+      programId: availablePrograms[0].id,
+    });
+  }
+
+  const activeAssignment = assignments.find((item) => item.assignment.status === 'active');
+  if (activeAssignment && recommendations.length === 0) {
+    recommendations.push({
+      id: `continue:${activeAssignment.assignment.id}`,
+      type: 'continue_learning',
+      priority: 'low',
+      title: `继续学习：${activeAssignment.program.title}`,
+      description: '当前没有明显风险，按课程顺序推进即可。',
+      reason: '学习状态稳定',
+      actionLabel: '继续学习',
+      assignmentId: activeAssignment.assignment.id,
+    });
+  }
+
+  const priorityOrder: Record<LearningRecommendation['priority'], number> = {
+    high: 0,
+    medium: 1,
+    low: 2,
+  };
+
+  return recommendations
+    .sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority])
+    .slice(0, 6);
 }
 
 export async function getStudentLearningView(
@@ -2512,6 +2772,8 @@ export async function getStudentLearningView(
     ),
     availablePrograms,
     applications: studentApplications.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    profile: findStudentProfile(store, user.id),
+    recommendations: buildLearningRecommendations(findStudentProfile(store, user.id), assignmentViews, availablePrograms),
   };
 }
 

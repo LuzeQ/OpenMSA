@@ -6,12 +6,14 @@ import {
   AlertTriangle,
   BarChart3,
   BookOpen,
+  Bot,
   CheckCircle2,
   ChevronDown,
   ExternalLink,
   Layers3,
   LayoutDashboard,
   Loader2,
+  MessageCircle,
   PlusCircle,
   Radio,
   RefreshCw,
@@ -20,9 +22,11 @@ import {
   Siren,
   Sparkles,
   Trash2,
+  Undo2,
   Users,
   Wand2,
   Workflow,
+  X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { LogoutButton } from '@/components/auth/logout-button';
@@ -49,9 +53,9 @@ import type {
   LearningCourseProgram,
   LearningLessonGenerationStatus,
   LearningProgramApplication,
+  LearningStudentProfile,
   LearningSyllabusAnalytics,
   TeacherAssignmentSummary,
-  TeacherInterventionItem,
   TeacherLearningView,
 } from '@/lib/types/learning';
 import type { Slide } from '@/lib/types/slides';
@@ -122,6 +126,46 @@ interface LessonGenerationProgressSnapshot {
   updatedAt: number;
 }
 
+interface CourseAgentMessage {
+  id: string;
+  role: 'teacher' | 'agent';
+  content: string;
+  createdAt: number;
+}
+
+interface CourseAgentGenerationRequest {
+  chapterIndex?: number;
+  lessonIndex?: number;
+  chapterTitle?: string;
+  lessonTitle?: string;
+  requirements?: string;
+}
+
+interface CourseAgentResponse {
+  success: boolean;
+  error?: string;
+  assistantMessage?: string;
+  summary?: string[];
+  draft?: ProgramDraft;
+  saveProgram?: boolean;
+  generationRequests?: CourseAgentGenerationRequest[];
+  modelString?: string;
+}
+
+interface CourseAgentGenerationRun {
+  id: string;
+  lessonTitle: string;
+  generationTaskId: string;
+  classroomJobId?: string;
+  classroomId?: string;
+  status: 'running' | 'succeeded' | 'failed';
+}
+
+interface CourseAgentUndoSnapshot {
+  draft: ProgramDraft;
+  editingProgramId: string | null;
+}
+
 interface TeacherLessonRef {
   programId: string;
   chapterId: string;
@@ -187,18 +231,25 @@ function formatProgramDate(iso: string): string {
   return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
 }
 
+function summarizeProfileItems(items: Array<{ title: string }>, fallback = '未填写'): string {
+  if (items.length === 0) return fallback;
+  return items
+    .slice(0, 3)
+    .map((item) => item.title)
+    .join('、');
+}
+
+function getStudentProfileSummary(profile: LearningStudentProfile | undefined): string {
+  if (!profile) return '画像未完善';
+  return `目标：${summarizeProfileItems(profile.goals)} · 薄弱点：${summarizeProfileItems(profile.weaknesses)}`;
+}
+
 function formatDuration(seconds: number): string {
   if (seconds <= 0) return '0m';
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   if (h === 0) return `${m}m`;
   return `${h}h ${m}m`;
-}
-
-function riskBadgeColor(level?: 'low' | 'medium' | 'high') {
-  if (level === 'high') return 'destructive';
-  if (level === 'medium') return 'secondary';
-  return 'outline';
 }
 
 function lessonGenerationStatusText(status?: LearningLessonGenerationStatus) {
@@ -312,6 +363,75 @@ function findProgramPreviewClassroomId(program: LearningCourseProgram): string |
     }
   }
   return undefined;
+}
+
+function cloneDraft(source: ProgramDraft): ProgramDraft {
+  return {
+    ...source,
+    chapters: source.chapters.map((chapter) => ({
+      ...chapter,
+      lessons: chapter.lessons.map((lesson) => ({ ...lesson })),
+    })),
+  };
+}
+
+function programToDraft(program: LearningCourseProgram): ProgramDraft {
+  return {
+    title: program.title,
+    description: program.description,
+    targetAudience: program.targetAudience || '',
+    source: program.source || 'manual',
+    chapters: program.chapters.map((chapter) => ({
+      id: chapter.id,
+      title: chapter.title,
+      description: chapter.description,
+      lessons: chapter.lessons.map((lesson) => ({
+        id: lesson.id,
+        title: lesson.title,
+        description: lesson.description,
+        learningObjectivesText: joinListOutput(lesson.learningObjectives),
+        prerequisitesText: joinListOutput(lesson.prerequisites),
+        difficulty: lesson.difficulty || 'basic',
+        diagnosticTagsText: joinListOutput(lesson.diagnosticTags),
+        classroomId: lesson.classroomId || '',
+        generationStatus: lesson.generationStatus,
+        previewUrl: lesson.previewUrl,
+        lastGenerationTaskId: lesson.lastGenerationTaskId,
+      })),
+    })),
+  };
+}
+
+function normalizeLookupText(value: string | undefined): string {
+  return (value || '').trim().toLowerCase();
+}
+
+function resolveAgentGenerationTarget(
+  program: LearningCourseProgram,
+  request: CourseAgentGenerationRequest,
+) {
+  const chapterByIndex =
+    typeof request.chapterIndex === 'number' ? program.chapters[request.chapterIndex] : undefined;
+  const chapterKey = normalizeLookupText(request.chapterTitle);
+  const chapter =
+    chapterByIndex ||
+    (chapterKey
+      ? program.chapters.find((item) => normalizeLookupText(item.title) === chapterKey)
+      : undefined);
+
+  if (!chapter) return null;
+
+  const lessonByIndex =
+    typeof request.lessonIndex === 'number' ? chapter.lessons[request.lessonIndex] : undefined;
+  const lessonKey = normalizeLookupText(request.lessonTitle);
+  const lesson =
+    lessonByIndex ||
+    (lessonKey
+      ? chapter.lessons.find((item) => normalizeLookupText(item.title) === lessonKey)
+      : undefined);
+
+  if (!lesson) return null;
+  return { chapter, lesson };
 }
 
 function escapePreviewHtml(value: string): string {
@@ -772,6 +892,18 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
   const [expandedChapterKeys, setExpandedChapterKeys] = useState<Record<string, boolean>>({});
   const [expandedProgramId, setExpandedProgramId] = useState<string | null>(null);
   const [programPreviewSlides, setProgramPreviewSlides] = useState<Record<string, Slide>>({});
+  const [courseAgentMessages, setCourseAgentMessages] = useState<CourseAgentMessage[]>([]);
+  const [courseAgentInput, setCourseAgentInput] = useState('');
+  const [courseAgentLoading, setCourseAgentLoading] = useState(false);
+  const [courseAgentSummaries, setCourseAgentSummaries] = useState<string[]>([]);
+  const [courseAgentUndoStack, setCourseAgentUndoStack] = useState<CourseAgentUndoSnapshot[]>([]);
+  const [courseAgentGenerationRuns, setCourseAgentGenerationRuns] = useState<
+    CourseAgentGenerationRun[]
+  >([]);
+  const [courseAgentPreviewClassroomId, setCourseAgentPreviewClassroomId] = useState<string | null>(
+    null,
+  );
+  const [courseAgentPanelOpen, setCourseAgentPanelOpen] = useState(false);
   const activePollingTaskIdsRef = useRef<Set<string>>(new Set());
 
   const fetchData = useCallback(async () => {
@@ -890,6 +1022,15 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
   const selectedAssignment = useMemo(
     () => data?.assignments.find((row) => row.assignment.id === selectedAssignmentId) || null,
     [data, selectedAssignmentId],
+  );
+  const selectedAssignmentProfile = useMemo(
+    () =>
+      selectedAssignment && data
+        ? data.studentProfiles.find(
+            (profile) => profile.studentId === selectedAssignment.assignment.studentId,
+          )
+        : undefined,
+    [data, selectedAssignment],
   );
 
   const assignProgram = useMemo(
@@ -1030,30 +1171,7 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
 
   const loadProgramToDraft = (program: LearningCourseProgram) => {
     setEditingProgramId(program.id);
-    setDraft({
-      title: program.title,
-      description: program.description,
-      targetAudience: program.targetAudience || '',
-      source: program.source || 'manual',
-      chapters: program.chapters.map((chapter) => ({
-        id: chapter.id,
-        title: chapter.title,
-        description: chapter.description,
-        lessons: chapter.lessons.map((lesson) => ({
-          id: lesson.id,
-          title: lesson.title,
-          description: lesson.description,
-          learningObjectivesText: joinListOutput(lesson.learningObjectives),
-          prerequisitesText: joinListOutput(lesson.prerequisites),
-          difficulty: lesson.difficulty || 'basic',
-          diagnosticTagsText: joinListOutput(lesson.diagnosticTags),
-          classroomId: lesson.classroomId || '',
-          generationStatus: lesson.generationStatus,
-          previewUrl: lesson.previewUrl,
-          lastGenerationTaskId: lesson.lastGenerationTaskId,
-        })),
-      })),
-    });
+    setDraft(programToDraft(program));
     setActivePanel('design');
   };
 
@@ -1062,8 +1180,8 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
     setDraft(EMPTY_DRAFT);
   };
 
-  const normalizeDraftChapters = () => {
-    return draft.chapters
+  const normalizeDraftChaptersFromDraft = (sourceDraft: ProgramDraft) => {
+    return sourceDraft.chapters
       .map((chapter) => ({
         id: chapter.id,
         title: chapter.title.trim(),
@@ -1085,6 +1203,70 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
           .filter((lesson) => lesson.title),
       }))
       .filter((chapter) => chapter.title);
+  };
+
+  const normalizeDraftChapters = () => normalizeDraftChaptersFromDraft(draft);
+
+  const saveDraftSnapshot = async (
+    sourceDraft: ProgramDraft,
+    programId: string | null,
+  ): Promise<LearningCourseProgram> => {
+    const chapters = normalizeDraftChaptersFromDraft(sourceDraft);
+    if (!sourceDraft.title.trim()) {
+      throw new Error('请先填写课程体系标题');
+    }
+    if (chapters.length === 0) {
+      throw new Error('至少需要一个有效章节');
+    }
+
+    if (programId) {
+      const currentProgramStatus =
+        data?.programs.find((item) => item.program.id === programId)?.program.status || 'draft';
+      const res = await fetch(`/api/learning/syllabi/${programId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          title: sourceDraft.title,
+          description: sourceDraft.description,
+          targetAudience: sourceDraft.targetAudience,
+          source: sourceDraft.source,
+          status: currentProgramStatus,
+          chapters,
+        }),
+      });
+      const payload = (await res.json()) as {
+        success: boolean;
+        error?: string;
+        syllabus?: LearningCourseProgram;
+      };
+      if (!res.ok || !payload.success || !payload.syllabus) {
+        throw new Error(payload.error || '更新课程体系失败');
+      }
+      return payload.syllabus;
+    }
+
+    const res = await fetch('/api/learning/syllabi', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: sourceDraft.title,
+        description: sourceDraft.description,
+        targetAudience: sourceDraft.targetAudience,
+        source: sourceDraft.source,
+        status: 'draft',
+        chapters,
+      }),
+    });
+    const payload = (await res.json()) as {
+      success: boolean;
+      error?: string;
+      syllabusId?: string;
+      syllabus?: LearningCourseProgram;
+    };
+    if (!res.ok || !payload.success || !payload.syllabus) {
+      throw new Error(payload.error || '创建课程体系失败');
+    }
+    return payload.syllabus;
   };
 
   const callAction = async (body: Record<string, unknown>) => {
@@ -1249,7 +1431,7 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
 
   const pollLessonGenerationTask = useCallback(async (lessonId: string, generationTaskId: string) => {
     if (activePollingTaskIdsRef.current.has(generationTaskId)) {
-      return;
+      return undefined;
     }
     activePollingTaskIdsRef.current.add(generationTaskId);
 
@@ -1303,44 +1485,41 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
             await bindLessonByGenerationTask(lessonId, generationTaskId, payload.classroomId);
             await fetchData();
             toast.success('课时内容生成完成并已自动绑定');
-            return;
+            return payload.classroomId;
           }
           await fetchData();
-          return;
+          return undefined;
         }
 
         if (payload.status === 'succeeded') {
           await fetchData();
-          return;
+          return payload.classroomId || undefined;
         }
 
         if (payload.status === 'failed') {
           await fetchData();
           toast.error('课时内容生成失败，请重试');
-          return;
+          return undefined;
         }
 
         await new Promise((resolve) => {
           setTimeout(resolve, 2500);
         });
       }
+      return undefined;
     } finally {
       activePollingTaskIdsRef.current.delete(generationTaskId);
     }
   }, [bindLessonByGenerationTask, fetchData]);
 
-  const onGenerateLessonContent = async (
+  const startLessonGeneration = async (
     programId: string,
     lessonId: string,
-    options?: { forceRichMedia?: boolean },
+    requirements: string,
+    options?: { forceRichMedia?: boolean; agentRunLabel?: string },
   ) => {
     const key = `${programId}:${lessonId}`;
-    if (lessonActionLoading[key]) return;
-
-    const extraRequirements = window.prompt('可选：补充本课时生成要求（留空则按大纲默认）', '');
-    if (extraRequirements === null) {
-      return;
-    }
+    if (lessonActionLoading[key]) return undefined;
 
     setLessonActionLoading((prev) => ({ ...prev, [key]: true }));
     let requestedModel = 'unknown';
@@ -1352,7 +1531,7 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
         headers: modelHeaders,
         body: JSON.stringify({
           syllabusId: programId,
-          requirements: extraRequirements.trim() || undefined,
+          requirements: requirements.trim() || undefined,
         }),
       });
       const payload = (await res.json()) as {
@@ -1384,6 +1563,18 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
           },
         }));
       }
+      if (options?.agentRunLabel) {
+        setCourseAgentGenerationRuns((prev) => [
+          {
+            id: payload.generationTaskId!,
+            lessonTitle: options.agentRunLabel!,
+            generationTaskId: payload.generationTaskId!,
+            classroomJobId: payload.classroomJobId,
+            status: 'running',
+          },
+          ...prev.filter((item) => item.generationTaskId !== payload.generationTaskId),
+        ]);
+      }
 
       toast.success(
         `${options?.forceRichMedia ? '已启动富媒体重生成' : '已启动课时生成'}（模型：${payload.modelString || 'unknown'}），正在处理中`,
@@ -1397,12 +1588,152 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
         },
       );
       await fetchData();
-      await pollLessonGenerationTask(lessonId, payload.generationTaskId);
+      const classroomId = await pollLessonGenerationTask(lessonId, payload.generationTaskId);
+      if (options?.agentRunLabel) {
+        setCourseAgentGenerationRuns((prev) =>
+          prev.map((item) =>
+            item.generationTaskId === payload.generationTaskId
+              ? {
+                  ...item,
+                  classroomId,
+                  status: classroomId ? 'succeeded' : 'failed',
+                }
+              : item,
+          ),
+        );
+        if (classroomId) {
+          setCourseAgentPreviewClassroomId(classroomId);
+        }
+      }
+      return classroomId;
     } catch (error) {
       const message = error instanceof Error ? error.message : '启动生成失败';
       toast.error(`${message}（请求模型：${requestedModel}）`);
+      return undefined;
     } finally {
       setLessonActionLoading((prev) => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const onGenerateLessonContent = async (
+    programId: string,
+    lessonId: string,
+    options?: { forceRichMedia?: boolean },
+  ) => {
+    const extraRequirements = window.prompt('可选：补充本课时生成要求（留空则按大纲默认）', '');
+    if (extraRequirements === null) {
+      return;
+    }
+
+    await startLessonGeneration(programId, lessonId, extraRequirements, options);
+  };
+
+  const runCourseAgentGenerationRequests = (
+    program: LearningCourseProgram,
+    requests: CourseAgentGenerationRequest[],
+  ) => {
+    for (const request of requests) {
+      const target = resolveAgentGenerationTarget(program, request);
+      if (!target) {
+        toast.error(`未找到要生成的课时：${request.lessonTitle || '未指定课时'}`);
+        continue;
+      }
+
+      void startLessonGeneration(program.id, target.lesson.id, request.requirements || '', {
+        agentRunLabel: target.lesson.title,
+      });
+    }
+  };
+
+  const onUndoCourseAgentChange = () => {
+    const [lastSnapshot, ...rest] = courseAgentUndoStack;
+    if (!lastSnapshot) return;
+    setDraft(cloneDraft(lastSnapshot.draft));
+    setEditingProgramId(lastSnapshot.editingProgramId);
+    setCourseAgentUndoStack(rest);
+    setCourseAgentSummaries(['已撤销上一轮 Agent 修改']);
+  };
+
+  const onSendCourseAgentMessage = async () => {
+    const message = courseAgentInput.trim();
+    if (!message || courseAgentLoading) return;
+
+    const userMessage: CourseAgentMessage = {
+      id: `teacher-${Date.now()}`,
+      role: 'teacher',
+      content: message,
+      createdAt: Date.now(),
+    };
+    setCourseAgentInput('');
+    setCourseAgentMessages((prev) => [...prev, userMessage]);
+    setCourseAgentLoading(true);
+
+    try {
+      const res = await fetch('/api/learning/course-agent', {
+        method: 'POST',
+        headers: buildModelHeaders(),
+        body: JSON.stringify({
+          message,
+          messages: courseAgentMessages.map((item) => ({
+            role: item.role,
+            content: item.content,
+          })),
+          draft,
+          editingProgramId,
+        }),
+      });
+      const payload = (await res.json()) as CourseAgentResponse;
+      if (!res.ok || !payload.success || !payload.draft || !payload.assistantMessage) {
+        throw new Error(payload.error || '课程 Agent 执行失败');
+      }
+
+      setCourseAgentUndoStack((prev) =>
+        [{ draft: cloneDraft(draft), editingProgramId }, ...prev].slice(0, 8),
+      );
+      setCourseAgentSummaries(payload.summary || []);
+
+      let nextDraft = cloneDraft(payload.draft);
+      let savedProgram: LearningCourseProgram | null = null;
+
+      setDraft(nextDraft);
+      setActivePanel('design');
+
+      const generationRequests = payload.generationRequests || [];
+      if (payload.saveProgram || generationRequests.length > 0) {
+        savedProgram = await saveDraftSnapshot(nextDraft, editingProgramId);
+        setEditingProgramId(savedProgram.id);
+        nextDraft = programToDraft(savedProgram);
+        setDraft(nextDraft);
+        await fetchData();
+        toast.success(generationRequests.length > 0 ? '课程已保存，开始生成课件' : '课程体系已保存');
+      } else {
+        toast.success(`课程草稿已更新（模型：${payload.modelString || 'unknown'}）`);
+      }
+
+      if (savedProgram && generationRequests.length > 0) {
+        runCourseAgentGenerationRequests(savedProgram, generationRequests);
+      }
+
+      const agentMessage: CourseAgentMessage = {
+        id: `agent-${Date.now()}`,
+        role: 'agent',
+        content: payload.assistantMessage,
+        createdAt: Date.now(),
+      };
+      setCourseAgentMessages((prev) => [...prev, agentMessage]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '课程 Agent 执行失败');
+      setCourseAgentMessages((prev) => [
+        ...prev,
+        {
+          id: `agent-error-${Date.now()}`,
+          role: 'agent',
+          content: error instanceof Error ? error.message : '课程 Agent 执行失败',
+          createdAt: Date.now(),
+        },
+      ]);
+    } finally {
+      setCourseAgentLoading(false);
     }
   };
 
@@ -1748,30 +2079,6 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
     }
   };
 
-  const onResolveIntervention = async (item: TeacherInterventionItem) => {
-    try {
-      if (item.type === 'stuck' && item.stuckId) {
-        await callAction({
-          action: 'resolve_stuck',
-          assignmentId: item.assignmentId,
-          stuckId: item.stuckId,
-          note: interventionNotes[item.id] || '',
-        });
-      } else if (item.type === 'risk' && item.riskKey) {
-        await callAction({
-          action: 'resolve_risk',
-          assignmentId: item.assignmentId,
-          riskKey: item.riskKey,
-          note: interventionNotes[item.id] || '',
-        });
-      }
-      toast.success('已记录介入处理');
-      await fetchData();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '处理失败');
-    }
-  };
-
   if (loading || !data) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
@@ -1994,7 +2301,7 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
         </div>
 
         {activePanel === 'operate' && (
-          <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]">
+          <div className="grid items-start gap-6">
             <section className="min-w-0">
               {data.programs.length === 0 ? (
                 <div className="rounded-[2rem] border border-dashed border-slate-300 bg-white/70 p-8 text-center text-sm text-slate-500 backdrop-blur-xl dark:border-slate-700 dark:bg-slate-900/70">
@@ -2179,197 +2486,92 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
                 </div>
               )}
             </section>
-
-            <aside className="min-w-0 space-y-4 xl:sticky xl:top-6">
-              <div className="min-w-0 rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80">
-                <div className="mb-4 flex items-center justify-between">
-                  <div>
-                    <h2 className="font-semibold">生成队列</h2>
-                    <p className="text-xs text-slate-500">只看需要操作的课时</p>
-                  </div>
-                  <Sparkles className="size-5 text-blue-500" />
-                </div>
-                <div className="min-w-0 space-y-2">
-                  {generationQueue.length === 0 ? (
-                    <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500 dark:bg-slate-950/40">
-                      暂无生成中或失败任务。
-                    </div>
-                  ) : (
-                    generationQueue.slice(0, 6).map((item) => (
-                      <button
-                        key={`${item.program.id}:${item.lesson.id}`}
-                        type="button"
-                        onClick={() =>
-                          setSelectedLessonRef({
-                            programId: item.program.id,
-                            chapterId: item.chapter.id,
-                            lessonId: item.lesson.id,
-                          })
-                        }
-                        className="w-full rounded-2xl border border-slate-200/70 bg-slate-50/80 p-3 text-left transition hover:bg-white dark:border-slate-800 dark:bg-slate-950/40 dark:hover:bg-slate-900"
-                      >
-                        <div className="flex items-center justify-between gap-2 text-sm font-medium">
-                          <span className="line-clamp-1">{item.lesson.title}</span>
-                          <Badge variant={lessonGenerationStatusVariant(item.lesson.generationStatus)}>
-                            {lessonGenerationStatusText(item.lesson.generationStatus)}
-                          </Badge>
-                        </div>
-                        {item.progress && (
-                          <div className="mt-2">
-                            <div className="mb-1 flex justify-between text-[11px] text-slate-500">
-                              <span>{classroomJobStepText(item.progress.step)}</span>
-                              <span>{item.progress.progress}%</span>
-                            </div>
-                            <div className="h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-                              <div
-                                className="h-full rounded-full bg-blue-500 transition-all"
-                                style={{ width: `${item.progress.progress}%` }}
-                              />
-                            </div>
-                          </div>
-                        )}
-                      </button>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              <div className="min-w-0 rounded-[1.75rem] border border-white/60 bg-white/80 p-5 shadow-xl shadow-black/[0.03] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80">
-                <div className="mb-4 flex items-center justify-between">
-                  <div>
-                    <h2 className="font-semibold">干预收件箱</h2>
-                    <p className="text-xs text-slate-500">风险和卡点优先处理</p>
-                  </div>
-                  <Siren className="size-5 text-rose-500" />
-                </div>
-                <div className="min-w-0 space-y-2">
-                  {data.interventionInbox.length === 0 ? (
-                    <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500 dark:bg-slate-950/40">
-                      暂无待介入事项。
-                    </div>
-                  ) : (
-                    data.interventionInbox.slice(0, 5).map((item) => (
-                      <div key={item.id} className="rounded-2xl border border-rose-200/70 bg-rose-50/70 p-3 dark:border-rose-900/60 dark:bg-rose-950/20">
-                        <div className="flex items-start justify-between gap-2">
-                          <div>
-                            <div className="text-sm font-medium text-rose-700 dark:text-rose-200">
-                              {item.studentUsername}
-                            </div>
-                            <div className="line-clamp-2 text-xs text-slate-600 dark:text-slate-300">
-                              {item.note}
-                            </div>
-                            <div className="mt-1 text-[11px] text-slate-500">
-                              {item.lessonTitle || item.programTitle} · {formatDateTime(item.createdAt)}
-                            </div>
-                          </div>
-                          <Badge variant="outline">{item.type === 'stuck' ? '卡点' : '风险'}</Badge>
-                        </div>
-                        <details className="mt-2">
-                          <summary className="cursor-pointer text-xs text-rose-600">处理</summary>
-                          <div className="mt-2 flex flex-col gap-2">
-                            <Input
-                              value={interventionNotes[item.id] || ''}
-                              onChange={(e) =>
-                                setInterventionNotes((prev) => ({ ...prev, [item.id]: e.target.value }))
-                              }
-                              placeholder="介入备注（可选）"
-                            />
-                            <Button size="sm" variant="outline" onClick={() => onResolveIntervention(item)}>
-                              <CheckCircle2 className="size-4" />
-                              标记已介入
-                            </Button>
-                          </div>
-                        </details>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            </aside>
           </div>
         )}
 
         {activePanel === 'design' && (
-          <section className="rounded-[2rem] border border-white/60 bg-white/80 p-5 shadow-2xl shadow-black/[0.04] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80 md:p-7">
-            <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-xl font-semibold">课程设计</h2>
-                <p className="text-sm text-slate-500">默认只露出关键字段，课时细节展开后再编辑。</p>
-              </div>
-              <div className="flex gap-2">
-                <Button onClick={onSaveProgramDraft} disabled={submitting}>
-                  <BookOpen className="size-4" />
-                  {editingProgramId ? '更新课程体系' : '保存课程体系'}
-                </Button>
-                {editingProgramId && (
-                  <Button variant="outline" onClick={resetDraft}>
-                    取消编辑
+          <div className="grid items-start gap-5">
+            <section className="rounded-[2rem] border border-white/60 bg-white/80 p-5 shadow-2xl shadow-black/[0.04] backdrop-blur-xl dark:border-slate-800/70 dark:bg-slate-900/80 md:p-7">
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-semibold">课程设计</h2>
+                  <p className="text-sm text-slate-500">默认只露出关键字段，课时细节展开后再编辑。</p>
+                </div>
+                <div className="flex gap-2">
+                  <Button onClick={onSaveProgramDraft} disabled={submitting}>
+                    <BookOpen className="size-4" />
+                    {editingProgramId ? '更新课程体系' : '保存课程体系'}
                   </Button>
-                )}
+                  {editingProgramId && (
+                    <Button variant="outline" onClick={resetDraft}>
+                      取消编辑
+                    </Button>
+                  )}
+                </div>
               </div>
-            </div>
 
-            <div className="grid gap-3 md:grid-cols-3">
-              <Input value={draft.title} onChange={(e) => updateDraft('title', e.target.value)} placeholder="课程体系标题" />
-              <Input value={draft.description} onChange={(e) => updateDraft('description', e.target.value)} placeholder="课程简介" />
-              <Input value={draft.targetAudience} onChange={(e) => updateDraft('targetAudience', e.target.value)} placeholder="目标受众" />
-            </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <Input value={draft.title} onChange={(e) => updateDraft('title', e.target.value)} placeholder="课程体系标题" />
+                <Input value={draft.description} onChange={(e) => updateDraft('description', e.target.value)} placeholder="课程简介" />
+                <Input value={draft.targetAudience} onChange={(e) => updateDraft('targetAudience', e.target.value)} placeholder="目标受众" />
+              </div>
 
-            <div className="mt-5 space-y-3">
-              {draft.chapters.map((chapter, chapterIndex) => (
-                <div key={`draft-chapter-${chapter.id || chapterIndex}`} className="rounded-3xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-950/30">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 font-medium">
-                      <Layers3 className="size-4 text-slate-400" />
-                      章节 {chapterIndex + 1}
+              <div className="mt-5 space-y-3">
+                {draft.chapters.map((chapter, chapterIndex) => (
+                  <div key={`draft-chapter-${chapter.id || chapterIndex}`} className="rounded-3xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-950/30">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 font-medium">
+                        <Layers3 className="size-4 text-slate-400" />
+                        章节 {chapterIndex + 1}
+                      </div>
+                      <Button size="sm" variant="ghost" onClick={() => removeChapter(chapterIndex)} disabled={draft.chapters.length === 1}>
+                        删除章节
+                      </Button>
                     </div>
-                    <Button size="sm" variant="ghost" onClick={() => removeChapter(chapterIndex)} disabled={draft.chapters.length === 1}>
-                      删除章节
+                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                      <Input value={chapter.title} onChange={(e) => updateChapter(chapterIndex, { title: e.target.value })} placeholder="章节标题" />
+                      <Input value={chapter.description} onChange={(e) => updateChapter(chapterIndex, { description: e.target.value })} placeholder="章节描述（可选）" />
+                    </div>
+                    <div className="mt-3 grid gap-2">
+                      {chapter.lessons.map((lesson, lessonIndex) => (
+                        <details key={`draft-lesson-${lesson.id || lessonIndex}`} className="rounded-2xl border border-slate-200/70 bg-white/70 p-3 dark:border-slate-800 dark:bg-slate-900/50">
+                          <summary className="cursor-pointer text-sm font-medium">
+                            {lesson.title || `课时 ${lessonIndex + 1}`}
+                          </summary>
+                          <div className="mt-3 grid gap-2">
+                            <div className="grid gap-2 md:grid-cols-12">
+                              <Input className="md:col-span-4" value={lesson.title} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { title: e.target.value })} placeholder="课时标题" />
+                              <Input className="md:col-span-4" value={lesson.description} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { description: e.target.value })} placeholder="课时说明（可选）" />
+                              <select className="h-9 rounded-md border border-input bg-transparent px-3 text-sm md:col-span-2" value={lesson.difficulty} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { difficulty: e.target.value as DraftLesson['difficulty'] })}>
+                                <option value="basic">基础</option>
+                                <option value="intermediate">进阶</option>
+                                <option value="advanced">高级</option>
+                              </select>
+                              <Button className="md:col-span-2" size="sm" variant="outline" onClick={() => removeLesson(chapterIndex, lessonIndex)}>
+                                删除课时
+                              </Button>
+                            </div>
+                            <Input value={lesson.learningObjectivesText} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { learningObjectivesText: e.target.value })} placeholder="学习目标（用；分隔）" />
+                            <Input value={lesson.prerequisitesText} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { prerequisitesText: e.target.value })} placeholder="先修知识（用；分隔）" />
+                            <Input value={lesson.diagnosticTagsText} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { diagnosticTagsText: e.target.value })} placeholder="诊断标签（用；分隔）" />
+                            <Input value={lesson.classroomId} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { classroomId: e.target.value })} placeholder="classroomId（可选）" />
+                          </div>
+                        </details>
+                      ))}
+                    </div>
+                    <Button className="mt-3" size="sm" variant="outline" onClick={() => addLesson(chapterIndex)}>
+                      <PlusCircle className="size-4" />
+                      新增课时
                     </Button>
                   </div>
-                  <div className="mt-3 grid gap-2 md:grid-cols-2">
-                    <Input value={chapter.title} onChange={(e) => updateChapter(chapterIndex, { title: e.target.value })} placeholder="章节标题" />
-                    <Input value={chapter.description} onChange={(e) => updateChapter(chapterIndex, { description: e.target.value })} placeholder="章节描述（可选）" />
-                  </div>
-                  <div className="mt-3 grid gap-2">
-                    {chapter.lessons.map((lesson, lessonIndex) => (
-                      <details key={`draft-lesson-${lesson.id || lessonIndex}`} className="rounded-2xl border border-slate-200/70 bg-white/70 p-3 dark:border-slate-800 dark:bg-slate-900/50">
-                        <summary className="cursor-pointer text-sm font-medium">
-                          {lesson.title || `课时 ${lessonIndex + 1}`}
-                        </summary>
-                        <div className="mt-3 grid gap-2">
-                          <div className="grid gap-2 md:grid-cols-12">
-                            <Input className="md:col-span-4" value={lesson.title} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { title: e.target.value })} placeholder="课时标题" />
-                            <Input className="md:col-span-4" value={lesson.description} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { description: e.target.value })} placeholder="课时说明（可选）" />
-                            <select className="h-9 rounded-md border border-input bg-transparent px-3 text-sm md:col-span-2" value={lesson.difficulty} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { difficulty: e.target.value as DraftLesson['difficulty'] })}>
-                              <option value="basic">基础</option>
-                              <option value="intermediate">进阶</option>
-                              <option value="advanced">高级</option>
-                            </select>
-                            <Button className="md:col-span-2" size="sm" variant="outline" onClick={() => removeLesson(chapterIndex, lessonIndex)}>
-                              删除课时
-                            </Button>
-                          </div>
-                          <Input value={lesson.learningObjectivesText} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { learningObjectivesText: e.target.value })} placeholder="学习目标（用；分隔）" />
-                          <Input value={lesson.prerequisitesText} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { prerequisitesText: e.target.value })} placeholder="先修知识（用；分隔）" />
-                          <Input value={lesson.diagnosticTagsText} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { diagnosticTagsText: e.target.value })} placeholder="诊断标签（用；分隔）" />
-                          <Input value={lesson.classroomId} onChange={(e) => updateLesson(chapterIndex, lessonIndex, { classroomId: e.target.value })} placeholder="classroomId（可选）" />
-                        </div>
-                      </details>
-                    ))}
-                  </div>
-                  <Button className="mt-3" size="sm" variant="outline" onClick={() => addLesson(chapterIndex)}>
-                    <PlusCircle className="size-4" />
-                    新增课时
-                  </Button>
-                </div>
-              ))}
-              <Button variant="outline" onClick={addChapter}>
-                <PlusCircle className="size-4" />
-                新增章节
-              </Button>
-            </div>
-          </section>
+                ))}
+                <Button variant="outline" onClick={addChapter}>
+                  <PlusCircle className="size-4" />
+                  新增章节
+                </Button>
+              </div>
+            </section>
+          </div>
         )}
 
         {activePanel === 'insights' && (
@@ -2390,6 +2592,9 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
                 ) : (
                   data.assignments.map((row) => {
                     const topRisk = row.riskSignals[0];
+                    const studentProfile = data.studentProfiles.find(
+                      (profile) => profile.studentId === row.assignment.studentId,
+                    );
                     return (
                       <button
                         key={row.assignment.id}
@@ -2404,6 +2609,9 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="font-medium">{row.assignment.studentUsername}</span>
                             <span className="text-xs text-slate-500">· {row.program.title}</span>
+                          </div>
+                          <div className="mt-1 line-clamp-1 text-xs text-slate-500">
+                            {getStudentProfileSummary(studentProfile)}
                           </div>
                           <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
                             <div
@@ -2430,17 +2638,27 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
                     暂无高风险学生。
                   </div>
                 ) : (
-                  topRiskRows.map((row) => (
-                    <button
-                      key={row.assignment.id}
-                      type="button"
-                      onClick={() => setSelectedAssignmentId(row.assignment.id)}
-                      className="w-full rounded-2xl bg-slate-50 p-3 text-left text-sm transition hover:bg-white dark:bg-slate-950/40 dark:hover:bg-slate-900"
-                    >
-                      <div className="font-medium">{row.assignment.studentUsername}</div>
-                      <div className="text-xs text-slate-500">{row.riskSignals[0]?.message || `${row.openStuckCount} 个待处理卡点`}</div>
-                    </button>
-                  ))
+                  topRiskRows.map((row) => {
+                    const studentProfile = data.studentProfiles.find(
+                      (profile) => profile.studentId === row.assignment.studentId,
+                    );
+                    return (
+                      <button
+                        key={row.assignment.id}
+                        type="button"
+                        onClick={() => setSelectedAssignmentId(row.assignment.id)}
+                        className="w-full rounded-2xl bg-slate-50 p-3 text-left text-sm transition hover:bg-white dark:bg-slate-950/40 dark:hover:bg-slate-900"
+                      >
+                        <div className="font-medium">{row.assignment.studentUsername}</div>
+                        <div className="text-xs text-slate-500">
+                          {row.riskSignals[0]?.message || `${row.openStuckCount} 个待处理卡点`}
+                        </div>
+                        <div className="mt-1 line-clamp-1 text-[11px] text-slate-400">
+                          {getStudentProfileSummary(studentProfile)}
+                        </div>
+                      </button>
+                    );
+                  })
                 )}
               </div>
             </div>
@@ -2505,6 +2723,163 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
             </div>
           </section>
         )}
+      </div>
+
+      <div className="fixed bottom-5 right-5 z-40 flex max-w-[calc(100vw-2rem)] flex-col items-end gap-3">
+        {courseAgentPanelOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: 12, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            className="max-h-[calc(100vh-7rem)] w-[min(calc(100vw-2rem),460px)] overflow-y-auto rounded-[1.75rem] border border-white/70 bg-white/95 p-4 shadow-2xl shadow-slate-950/15 backdrop-blur-xl dark:border-slate-800/80 dark:bg-slate-950/95"
+            role="dialog"
+            aria-label="课程共创助手"
+          >
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-violet-50 px-3 py-1 text-xs font-medium text-violet-700 dark:bg-violet-950/40 dark:text-violet-200">
+                  <Bot className="size-3.5" />
+                  系统 Agent
+                </div>
+                <h2 className="font-semibold">课程共创助手</h2>
+                <p className="text-xs text-slate-500">随时创建课程、调整草稿，并按明确指令生成课件。</p>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="shrink-0 rounded-full"
+                disabled={courseAgentUndoStack.length === 0}
+                onClick={onUndoCourseAgentChange}
+              >
+                <Undo2 className="size-4" />
+                撤销
+              </Button>
+            </div>
+
+            <div className="max-h-[34vh] min-h-32 space-y-3 overflow-y-auto rounded-2xl bg-slate-50/80 p-3 dark:bg-slate-900/60">
+              {courseAgentMessages.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-slate-300/70 p-4 text-sm text-slate-500 dark:border-slate-700">
+                  试试：“帮我设计一个初二物理电学课程，包含 3 章 8 个课时。”
+                </div>
+              ) : (
+                courseAgentMessages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={cn(
+                      'rounded-2xl px-3 py-2 text-sm',
+                      message.role === 'teacher'
+                        ? 'ml-8 bg-slate-950 text-white dark:bg-white dark:text-slate-950'
+                        : 'mr-8 border border-slate-200/70 bg-white/80 dark:border-slate-800 dark:bg-slate-900/70',
+                    )}
+                  >
+                    <div className="mb-1 text-[11px] opacity-60">
+                      {message.role === 'teacher' ? '老师' : '课程 Agent'}
+                    </div>
+                    <div className="whitespace-pre-wrap">{message.content}</div>
+                  </div>
+                ))
+              )}
+              {courseAgentLoading && (
+                <div className="mr-8 rounded-2xl border border-slate-200/70 bg-white/80 px-3 py-2 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900/70">
+                  正在理解并更新课程草稿...
+                </div>
+              )}
+            </div>
+
+            {courseAgentSummaries.length > 0 && (
+              <div className="mt-3 space-y-2 rounded-2xl border border-blue-100 bg-blue-50/70 p-3 text-xs text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/20 dark:text-blue-200">
+                {courseAgentSummaries.map((item) => (
+                  <div key={item}>· {item}</div>
+                ))}
+              </div>
+            )}
+
+            <div className="mt-4 space-y-2">
+              <Textarea
+                value={courseAgentInput}
+                onChange={(e) => setCourseAgentInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    void onSendCourseAgentMessage();
+                  }
+                }}
+                placeholder="描述你想创建或调整的课程；明确说“生成第 1 课课件”才会启动课件生成。"
+                rows={4}
+              />
+              <Button
+                className="w-full"
+                onClick={onSendCourseAgentMessage}
+                disabled={courseAgentLoading || !courseAgentInput.trim()}
+              >
+                {courseAgentLoading ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+                发送给 Agent
+              </Button>
+            </div>
+
+            {(courseAgentGenerationRuns.length > 0 || courseAgentPreviewClassroomId) && (
+              <div className="mt-4 rounded-2xl border border-slate-200/70 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-900/70">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold">课件效果</h3>
+                    <p className="text-xs text-slate-500">生成完成后直接预览课堂。</p>
+                  </div>
+                  <Sparkles className="size-5 text-blue-500" />
+                </div>
+                <div className="space-y-2">
+                  {courseAgentGenerationRuns.map((run) => {
+                    const progress = lessonGenerationProgressByTask[run.generationTaskId];
+                    return (
+                      <div key={run.id} className="rounded-xl bg-white/80 p-3 text-xs dark:bg-slate-950/50">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="line-clamp-1 font-medium">{run.lessonTitle}</span>
+                          <span className="text-slate-500">
+                            {run.status === 'succeeded'
+                              ? '已完成'
+                              : run.status === 'failed'
+                                ? '失败'
+                                : `${progress?.progress ?? 0}%`}
+                          </span>
+                        </div>
+                        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                          <div
+                            className={cn(
+                              'h-full rounded-full transition-all',
+                              run.status === 'failed' ? 'bg-rose-500' : 'bg-blue-500',
+                            )}
+                            style={{ width: `${run.status === 'succeeded' ? 100 : progress?.progress ?? 5}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {courseAgentPreviewClassroomId && (
+                  <div className="mt-3 overflow-hidden rounded-xl border border-slate-200/70 bg-slate-950 dark:border-slate-800">
+                    <iframe
+                      title="课程 Agent 课堂预览"
+                      src={`/classroom/${courseAgentPreviewClassroomId}?embed=teacher-preview`}
+                      className="h-[320px] w-full"
+                      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+          </motion.div>
+        )}
+
+        <Button
+          type="button"
+          aria-label={courseAgentPanelOpen ? '收起课程共创助手' : '展开课程共创助手'}
+          aria-expanded={courseAgentPanelOpen}
+          onClick={() => setCourseAgentPanelOpen((open) => !open)}
+          className="relative size-14 rounded-full shadow-2xl shadow-blue-950/20"
+        >
+          {courseAgentPanelOpen ? <X className="size-5" /> : <MessageCircle className="size-5" />}
+          {!courseAgentPanelOpen && (courseAgentMessages.length > 0 || courseAgentGenerationRuns.length > 0) && (
+            <span className="absolute -right-1 -top-1 size-3 rounded-full bg-blue-400 ring-2 ring-white dark:ring-slate-950" />
+          )}
+        </Button>
       </div>
 
       <Dialog open={Boolean(selectedLessonContext)} onOpenChange={(open) => !open && setSelectedLessonRef(null)}>
@@ -2729,6 +3104,36 @@ export function TeacherDashboardClient({ username }: TeacherDashboardClientProps
                   <div className="text-xs text-slate-500">卡点</div>
                   <div className="text-2xl font-semibold">{selectedAssignment.openStuckCount}</div>
                 </div>
+              </div>
+              <div className="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-900/70">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium">学习画像</div>
+                    <div className="text-xs text-slate-500">学生目标、偏好和自报薄弱点</div>
+                  </div>
+                  <Badge variant={selectedAssignmentProfile ? 'secondary' : 'outline'}>
+                    {selectedAssignmentProfile ? '已填写' : '未填写'}
+                  </Badge>
+                </div>
+                <div className="grid gap-2 text-xs text-slate-600 dark:text-slate-300 md:grid-cols-3">
+                  <div className="rounded-xl bg-white/70 p-3 dark:bg-slate-950/40">
+                    <div className="mb-1 font-medium text-slate-900 dark:text-white">目标</div>
+                    {summarizeProfileItems(selectedAssignmentProfile?.goals || [])}
+                  </div>
+                  <div className="rounded-xl bg-white/70 p-3 dark:bg-slate-950/40">
+                    <div className="mb-1 font-medium text-slate-900 dark:text-white">偏好</div>
+                    {summarizeProfileItems(selectedAssignmentProfile?.preferences || [])}
+                  </div>
+                  <div className="rounded-xl bg-white/70 p-3 dark:bg-slate-950/40">
+                    <div className="mb-1 font-medium text-slate-900 dark:text-white">薄弱点</div>
+                    {summarizeProfileItems(selectedAssignmentProfile?.weaknesses || [])}
+                  </div>
+                </div>
+                {selectedAssignment.riskSignals.length > 0 && (
+                  <div className="mt-3 rounded-xl bg-amber-50/80 p-3 text-xs text-amber-900 dark:bg-amber-950/20 dark:text-amber-100">
+                    推荐依据：{selectedAssignment.riskSignals[0].message}
+                  </div>
+                )}
               </div>
               <div className="space-y-2">
                 {selectedAssignment.chapterSummaries.map((chapter) => (
